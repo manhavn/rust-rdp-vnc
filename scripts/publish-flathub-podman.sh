@@ -30,6 +30,10 @@
 #   MODE=first|update        first = flathub/flathub new-pr; update = app repo
 #   FLATHUB_VIDEO_URL        Public demo video URL for the submission PR body
 #                            (GitHub user-attachments or raw .webm URL)
+#   TOOLS_IMAGE              Podman tools image ref
+#                            (default: build.dev/flathub-rust-rdp-vnc:v1.0.0)
+#   TOOLS_IMAGE_TAR          Optional path to image .tar under scripts/
+#                            (default: scripts/<image-ref with specials→.>.tar)
 #
 set -euo pipefail
 
@@ -334,16 +338,55 @@ GIT_COMMIT="$(git -C "$ROOT" rev-list -n 1 "${GIT_TAG}")"
 ok "commit ${GIT_COMMIT}"
 
 # ── Podman image with tools ──────────────────────────────────────────────────
-# venv on a volume stores absolute symlinks to /usr/bin/python3. A bare
-# ubuntu:24.04 container does NOT have python3 until apt-install — so we bake
-# tools into a local image once, then reuse it.
+# Bake tools into a named image once, save as .tar under scripts/ for reload.
+# Default ref: build.dev/flathub-rust-rdp-vnc:v1.0.0
+# Tar name: special chars → '.' ; keep '-'  →  scripts/build.dev.flathub-rust-rdp-vnc.v1.0.0.tar
 
-TOOLS_IMAGE="${TOOLS_IMAGE:-localhost/rust-rdp-vnc-flathub-tools:latest}"
+TOOLS_IMAGE="${TOOLS_IMAGE:-build.dev/flathub-rust-rdp-vnc:v1.0.0}"
 CACHE_VOL="rust-rdp-vnc-flathub-cache"
+SCRIPTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-info "Ensuring Podman tools image (${TOOLS_IMAGE})…"
-if ! podman image exists "${TOOLS_IMAGE}" 2>/dev/null; then
-  info "Building tools image (one-time, ~1–2 min)…"
+# build.dev/flathub-rust-rdp-vnc:v1.0.0 → build.dev.flathub-rust-rdp-vnc.v1.0.0.tar
+image_ref_to_tar_basename() {
+  local ref="$1"
+  # Keep letters, digits, hyphen, and dots; every other char becomes '.'
+  local base
+  base="$(printf '%s' "$ref" | sed 's/[^A-Za-z0-9.-]/./g')"
+  # Collapse accidental runs of dots from consecutive specials (e.g. "://")
+  base="$(printf '%s' "$base" | sed 's/\.\+/\./g; s/^\.//; s/\.$//')"
+  printf '%s.tar' "$base"
+}
+
+TOOLS_IMAGE_TAR="${TOOLS_IMAGE_TAR:-${SCRIPTS_DIR}/$(image_ref_to_tar_basename "${TOOLS_IMAGE}")}"
+
+save_tools_image_tar() {
+  info "Saving Podman image → ${TOOLS_IMAGE_TAR}"
+  mkdir -p "$(dirname "${TOOLS_IMAGE_TAR}")"
+  # Atomic-ish write: save to .partial then rename
+  local partial="${TOOLS_IMAGE_TAR}.partial"
+  rm -f "${partial}"
+  podman save -o "${partial}" "${TOOLS_IMAGE}" \
+    || die "podman save failed for ${TOOLS_IMAGE}"
+  mv -f "${partial}" "${TOOLS_IMAGE_TAR}"
+  ok "saved $(du -h "${TOOLS_IMAGE_TAR}" | awk '{print $1}')  ${TOOLS_IMAGE_TAR}"
+}
+
+load_tools_image_tar() {
+  [[ -f "${TOOLS_IMAGE_TAR}" ]] || return 1
+  info "Loading Podman image from tar (skip rebuild)…"
+  info "  ${TOOLS_IMAGE_TAR}"
+  podman load -i "${TOOLS_IMAGE_TAR}" \
+    || die "podman load failed: ${TOOLS_IMAGE_TAR}"
+  if ! podman image exists "${TOOLS_IMAGE}" 2>/dev/null; then
+    # Older tars / retag: try to tag the most recently loaded image id
+    die "Loaded tar but image ref ${TOOLS_IMAGE} is missing.
+  Rebuild once: rm -f '${TOOLS_IMAGE_TAR}' && re-run this script."
+  fi
+  ok "loaded ${TOOLS_IMAGE}"
+}
+
+build_tools_image() {
+  info "Building tools image ${TOOLS_IMAGE} (one-time, ~1–2 min)…"
   podman build -t "${TOOLS_IMAGE}" -f - <<'EOF'
 FROM docker.io/library/ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
@@ -354,9 +397,25 @@ RUN apt-get update -qq \
  && rm -rf /var/lib/apt/lists/* \
  && python3 --version
 EOF
-  ok "tools image built"
+  ok "tools image built: ${TOOLS_IMAGE}"
+}
+
+info "Ensuring Podman tools image (${TOOLS_IMAGE})…"
+info "Image archive: ${TOOLS_IMAGE_TAR}"
+
+if podman image exists "${TOOLS_IMAGE}" 2>/dev/null; then
+  ok "tools image already present in Podman"
+  # Keep a portable cache under scripts/ for other machines / clean podman stores
+  if [[ ! -f "${TOOLS_IMAGE_TAR}" ]]; then
+    save_tools_image_tar
+  else
+    ok "tar cache already exists"
+  fi
+elif [[ -f "${TOOLS_IMAGE_TAR}" ]]; then
+  load_tools_image_tar
 else
-  ok "tools image already present"
+  build_tools_image
+  save_tools_image_tar
 fi
 
 info "Ensuring Podman cache volume ${CACHE_VOL}…"
@@ -497,6 +556,45 @@ EOF
 
 write_flathub_pr_body "${PKG_DIR}/PR-BODY.md"
 
+# Title depends on submit mode (first vs update).
+if [[ "${MODE}" == "update" ]]; then
+  PR_TITLE="Update ${APP_ID} to ${GIT_TAG}"
+else
+  PR_TITLE="Add ${APP_ID}"
+fi
+printf '%s\n' "${PR_TITLE}" > "${PKG_DIR}/PR-TITLE.txt"
+
+# Pretty printer so the user can copy/paste if gh pr create fails later.
+print_pr_copy_block() {
+  local title="${1:-${PR_TITLE}}"
+  local body_file="${2:-${PKG_DIR}/PR-BODY.md}"
+  echo
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║  PR title + description (copy to recreate PR if needed)       ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo
+  echo "Base branch:  new-pr   (flathub/flathub — first submit only)"
+  echo "Repo:         flathub/flathub   (or flathub/${APP_ID} for updates)"
+  echo
+  echo "──────── PR title (copy below) ────────────────────────────────"
+  echo "${title}"
+  echo "──────── end title ────────────────────────────────────────────"
+  echo
+  echo "──────── PR description (copy below) ──────────────────────────"
+  if [[ -f "${body_file}" ]]; then
+    cat "${body_file}"
+  else
+    echo "(missing body file: ${body_file})"
+  fi
+  echo
+  echo "──────── end description ──────────────────────────────────────"
+  echo
+  echo "Saved for later:"
+  echo "  title: ${PKG_DIR}/PR-TITLE.txt"
+  echo "  body:  ${body_file}"
+  echo
+}
+
 cat > "${PKG_DIR}/README-SUBMIT.md" <<EOF
 # Flathub package for ${APP_ID}
 
@@ -596,6 +694,9 @@ EOF
 ok "package tree ready (toplevel)"
 ls -la "${PKG_DIR}"
 
+# Always show PR text early (package is ready even if PR open fails later).
+print_pr_copy_block "${PR_TITLE}" "${PKG_DIR}/PR-BODY.md"
+
 # ── optional smoke build ─────────────────────────────────────────────────────
 
 if [[ "${SKIP_BUILD}" != "1" ]]; then
@@ -672,19 +773,39 @@ if [[ "${OPEN_PR}" == "1" ]]; then
       git push -u fork "HEAD:refs/heads/${BRANCH}"
       # Official checklist body (base new-pr). Video URL via FLATHUB_VIDEO_URL.
       write_flathub_pr_body "${TMP_GH}/PR-BODY.md"
-      gh pr create \
+      printf '%s\n' "${PR_TITLE}" > "${TMP_GH}/PR-TITLE.txt"
+      info "PR title/description (copy if create fails)…"
+      print_pr_copy_block "${PR_TITLE}" "${TMP_GH}/PR-BODY.md"
+      if gh pr create \
         --repo flathub/flathub \
         --base new-pr \
         --head "${GH_USER}:${BRANCH}" \
-        --title "Add ${APP_ID}" \
+        --title "${PR_TITLE}" \
         --body-file "${TMP_GH}/PR-BODY.md"
+      then
+        ok "PR opened (check GitHub) — base branch must be new-pr"
+      else
+        echo
+        echo "ERROR: gh pr create failed. Use the title/description printed above"
+        echo "to open the PR manually on GitHub (base = new-pr)."
+        echo "  title file: ${PKG_DIR}/PR-TITLE.txt"
+        echo "  body file:  ${PKG_DIR}/PR-BODY.md"
+        exit 1
+      fi
     )
-    ok "PR opened (check GitHub) — base branch must be new-pr"
   else
     info "Preparing update PR against flathub/${APP_ID}…"
     if ! gh repo view "flathub/${APP_ID}" >/dev/null 2>&1; then
       die "Repo flathub/${APP_ID} not found — app not on Flathub yet; use MODE=first"
     fi
+    # Update PR body is shorter than first-submit checklist.
+    PR_TITLE="Update ${APP_ID} to ${GIT_TAG}"
+    printf '%s\n' "${PR_TITLE}" > "${PKG_DIR}/PR-TITLE.txt"
+    cat > "${PKG_DIR}/PR-BODY.md" <<EOF
+Update **${APP_ID}** to upstream \`${GIT_TAG}\` (\`${GIT_COMMIT}\`).
+
+Upstream: ${UPSTREAM_WEB}
+EOF
     APP_UPSTREAM="$(github_repo_url "flathub/${APP_ID}")"
     git clone --depth 1 "${APP_UPSTREAM}" "${TMP_GH}/app" \
       || die "Cannot clone flathub/${APP_ID} via ${GIT_AUTH}"
@@ -694,6 +815,9 @@ if [[ "${OPEN_PR}" == "1" ]]; then
     )
     rsync -a --delete \
       --exclude .git \
+      --exclude README-SUBMIT.md \
+      --exclude PR-BODY.md \
+      --exclude PR-TITLE.txt \
       "${PKG_DIR}/" "${TMP_GH}/app/"
     FORK_PUSH="$(github_fork_push_url "${GH_USER}/${APP_ID}")"
     (
@@ -707,11 +831,23 @@ if [[ "${OPEN_PR}" == "1" ]]; then
       git remote remove fork 2>/dev/null || true
       git remote add fork "${FORK_PUSH}"
       git push -u fork "HEAD:${BRANCH}"
-      gh pr create \
+      info "PR title/description (copy if create fails)…"
+      print_pr_copy_block "${PR_TITLE}" "${PKG_DIR}/PR-BODY.md"
+      if gh pr create \
         --repo "flathub/${APP_ID}" \
         --head "${GH_USER}:${BRANCH}" \
-        --title "Update to ${GIT_TAG}" \
-        --body "Update to upstream \`${GIT_TAG}\` (\`${GIT_COMMIT}\`)."
+        --title "${PR_TITLE}" \
+        --body-file "${PKG_DIR}/PR-BODY.md"
+      then
+        ok "Update PR opened"
+      else
+        echo
+        echo "ERROR: gh pr create failed. Use the title/description printed above"
+        echo "to open the PR manually."
+        echo "  title file: ${PKG_DIR}/PR-TITLE.txt"
+        echo "  body file:  ${PKG_DIR}/PR-BODY.md"
+        exit 1
+      fi
     )
     ok "Update PR flow finished"
   fi
@@ -732,21 +868,25 @@ Contents:
   ${APP_ID}.yml          (git tag ${GIT_TAG} @ ${GIT_COMMIT})
   generated-sources.json
   desktop + metainfo + icons
+  PR-TITLE.txt / PR-BODY.md   (copy-paste for manual PR)
 
-Next steps if you did NOT open a PR:
+Next steps if you did NOT open a PR (or gh failed):
   1) Tag ${GIT_TAG} was ensured on origin (auto-created/pushed if it was missing)
   2) First app (order matters):
        a. Clone upstream new-pr:
             git clone -b new-pr git@github.com:flathub/flathub.git
             # or HTTPS: https://github.com/flathub/flathub.git
-       b. Branch from new-pr, copy ${PKG_DIR}/* to repo ROOT (not a subfolder)
-       c. Commit, push to YOUR fork, PR base = new-pr
-       See ${PKG_DIR}/README-SUBMIT.md
+       b. Branch from new-pr, copy packaging files to repo ROOT
+          (skip README-SUBMIT.md PR-BODY.md PR-TITLE.txt)
+       c. Commit, push to YOUR fork, open PR base = new-pr
+          Title/body: see block below (or ${PKG_DIR}/PR-*.txt/md)
   3) Or re-run with OPEN_PR=1:
-       GIT_AUTH=ssh OPEN_PR=1 ./scripts/publish-flathub-podman.sh   # SSH key, no token
-       GIT_AUTH=https GH_USER=… GH_TOKEN=… OPEN_PR=1 ./scripts/…
+       GIT_AUTH=ssh OPEN_PR=1 ./scripts/publish-flathub-podman.sh
 
 Docs: flatpak/README.vi.md
 Local test (host): ./scripts/publish-flatpak.sh
 
 EOF
+
+# Final reprint so title/description is the last thing on screen.
+print_pr_copy_block "${PR_TITLE}" "${PKG_DIR}/PR-BODY.md"

@@ -39,6 +39,10 @@ snap/.snapcraft/
 flatpak/generated-sources.json
 flathub-out/
 flathub-submit/
+
+# Podman tools image archives (large; recreated by publish-flathub-podman.sh)
+scripts/*.tar
+scripts/*.tar.partial
 Screenshot.png
 
 Screencast*.webm
