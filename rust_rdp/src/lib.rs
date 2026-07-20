@@ -4,6 +4,8 @@ mod android_jni;
 
 pub use callback::{SessionCallback, SharedCallback};
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use lazy_static::lazy_static;
 use tokio::time::{sleep, Duration};
@@ -59,7 +61,35 @@ struct RdpSession {
 
 lazy_static! {
     static ref RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
-    static ref SESSION: Mutex<Option<Arc<Mutex<RdpSession>>>> = Mutex::new(None);
+    /// Concurrent remote sessions (desktop multi-tab). Android typically uses one.
+    static ref SESSIONS: Mutex<HashMap<u64, Arc<Mutex<RdpSession>>>> = Mutex::new(HashMap::new());
+}
+
+/// Monotonic session ids starting at 1 (0 = none).
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+/// Session that receives mouse/keyboard input from the single-session input APIs.
+static ACTIVE_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+
+fn register_session(session: Arc<Mutex<RdpSession>>) -> u64 {
+    let id = NEXT_SESSION_ID.fetch_add(1, AtomicOrdering::SeqCst);
+    SESSIONS.lock().unwrap().insert(id, session);
+    ACTIVE_SESSION_ID.store(id, AtomicOrdering::SeqCst);
+    id
+}
+
+fn with_active_session<F>(f: F)
+where
+    F: FnOnce(&RdpSession),
+{
+    let id = ACTIVE_SESSION_ID.load(AtomicOrdering::SeqCst);
+    if id == 0 {
+        return;
+    }
+    let sessions = SESSIONS.lock().unwrap();
+    if let Some(session) = sessions.get(&id) {
+        let sess = session.lock().unwrap();
+        f(&sess);
+    }
 }
 
 #[derive(Debug)]
@@ -894,6 +924,8 @@ pub fn init_runtime() {
     }
 }
 
+/// Start a new remote session and return its id for multi-tab clients.
+/// Input APIs target the active session ([`set_active_session`]); new connects become active.
 pub fn connect_session(
     host_str: String,
     port: i32,
@@ -904,7 +936,7 @@ pub fn connect_session(
     height: i32,
     conn_mode_str: String,
     callback: SharedCallback,
-) {
+) -> u64 {
     log::info!(
         "Connecting ({}). Host: {}, Port: {}, User: {}, Domain: {}, Width: {}, Height: {}",
         conn_mode_str, host_str, port, user_str, domain_str, width, height
@@ -926,8 +958,8 @@ pub fn connect_session(
             callback: callback.clone(),
         }));
 
-        // Save in global state
-        *SESSION.lock().unwrap() = Some(session.clone());
+        let session_id = register_session(session.clone());
+        log::info!("Registered VNC session id={session_id}");
 
         let callback_clone = callback.clone();
         let active_clone = active.clone();
@@ -1071,19 +1103,21 @@ pub fn connect_session(
                 }
             });
         }
-    } else {
-        // --- RDP Mode Setup ---
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<FastPathInputEvent>();
+        return session_id;
+    }
 
-        // Create session structure
-        let session = Arc::new(Mutex::new(RdpSession {
-            active: active.clone(),
-            session_type: SessionType::Rdp { input_tx },
-            callback: callback.clone(),
-        }));
+    // --- RDP Mode Setup ---
+    let (input_tx, mut input_rx) = mpsc::unbounded_channel::<FastPathInputEvent>();
 
-        // Save in global state
-        *SESSION.lock().unwrap() = Some(session.clone());
+    // Create session structure
+    let session = Arc::new(Mutex::new(RdpSession {
+        active: active.clone(),
+        session_type: SessionType::Rdp { input_tx },
+        callback: callback.clone(),
+    }));
+
+    let session_id = register_session(session.clone());
+    log::info!("Registered RDP session id={session_id}");
 
         let callback_clone = callback.clone();
         let active_clone = active.clone();
@@ -1512,24 +1546,49 @@ pub fn connect_session(
                 }
             });
         }
-    }
+
+    session_id
 }
 
-pub fn disconnect_session() {
-    log::info!("Disconnect session triggered");
-    let mut sess_guard = SESSION.lock().unwrap();
-    if let Some(ref session) = *sess_guard {
+/// Route subsequent mouse/keyboard input to the given session (desktop multi-tab).
+pub fn set_active_session(id: u64) {
+    ACTIVE_SESSION_ID.store(id, AtomicOrdering::SeqCst);
+}
+
+/// Disconnect a single session by id.
+pub fn disconnect_session_id(id: u64) {
+    if id == 0 {
+        return;
+    }
+    log::info!("Disconnect session id={id}");
+    let mut sessions = SESSIONS.lock().unwrap();
+    if let Some(session) = sessions.remove(&id) {
         let sess = session.lock().unwrap();
         *sess.active.lock().unwrap() = false;
         notify_state_change(sess.callback.as_ref(), 0, "Disconnected");
     }
-    *sess_guard = None;
+    if ACTIVE_SESSION_ID.load(AtomicOrdering::SeqCst) == id {
+        let next = sessions.keys().next().copied().unwrap_or(0);
+        ACTIVE_SESSION_ID.store(next, AtomicOrdering::SeqCst);
+    }
+}
+
+/// Disconnect every active session (Android single-client / app exit).
+pub fn disconnect_session() {
+    log::info!("Disconnect all sessions");
+    let mut sessions = SESSIONS.lock().unwrap();
+    for (id, session) in sessions.drain() {
+        log::info!("Disconnecting session id={id}");
+        let sess = session.lock().unwrap();
+        *sess.active.lock().unwrap() = false;
+        notify_state_change(sess.callback.as_ref(), 0, "Disconnected");
+    }
+    ACTIVE_SESSION_ID.store(0, AtomicOrdering::SeqCst);
 }
 
 /// action: 0 = move, 1 = left down, 2 = left up, 3 = right down, 4 = right up
 pub fn send_mouse_event(x: i32, y: i32, action: i32) {
-    if let Some(ref session) = *SESSION.lock().unwrap() {
-        let sess = session.lock().unwrap();
+    with_active_session(|sess| {
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
                 let flags = match action {
@@ -1567,15 +1626,14 @@ pub fn send_mouse_event(x: i32, y: i32, action: i32) {
                 let _ = input_tx.send(event);
             }
         }
-    }
+    });
 }
 
 pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
     if units == 0 {
         return;
     }
-    if let Some(ref session) = *SESSION.lock().unwrap() {
-        let sess = session.lock().unwrap();
+    with_active_session(|sess| {
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
                 // Expand total delta into multiple 120-unit notches (Windows WHEEL_DELTA).
@@ -1644,12 +1702,11 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                 }
             }
         }
-    }
+    });
 }
 
 pub fn send_key_event(keycode: i32, pressed: i32) {
-    if let Some(ref session) = *SESSION.lock().unwrap() {
-        let sess = session.lock().unwrap();
+    with_active_session(|sess| {
         let down = pressed != 0;
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
@@ -1658,7 +1715,7 @@ pub fn send_key_event(keycode: i32, pressed: i32) {
                 } else {
                     KeyboardFlags::empty()
                 };
-                
+
                 let input_event = if keycode == 8 {
                     FastPathInputEvent::KeyboardEvent(flags, 0x0E)
                 } else if keycode == 13 {
@@ -1666,7 +1723,7 @@ pub fn send_key_event(keycode: i32, pressed: i32) {
                 } else {
                     FastPathInputEvent::UnicodeKeyboardEvent(flags, keycode as u16)
                 };
-                
+
                 let _ = input_tx.send(input_event);
             }
             SessionType::Vnc { input_tx, .. } => {
@@ -1684,12 +1741,11 @@ pub fn send_key_event(keycode: i32, pressed: i32) {
                 let _ = input_tx.send(event);
             }
         }
-    }
+    });
 }
 
 pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
-    if let Some(ref session) = *SESSION.lock().unwrap() {
-        let sess = session.lock().unwrap();
+    with_active_session(|sess| {
         let down = pressed != 0;
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
@@ -1714,5 +1770,5 @@ pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
                 }
             }
         }
-    }
+    });
 }

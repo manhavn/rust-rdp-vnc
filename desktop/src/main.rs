@@ -3,8 +3,9 @@ mod keys;
 use eframe::egui::{self, Align, Color32, ColorImage, Key, Layout, RichText, TextureHandle, TextureOptions, Vec2};
 use parking_lot::Mutex;
 use rust_rdp::{
-    connect_session, disconnect_session, init_runtime, send_key_event, send_mouse_event,
-    send_mouse_wheel_event, send_scancode_event, SessionCallback,
+    connect_session, disconnect_session, disconnect_session_id, init_runtime, send_key_event,
+    send_mouse_event, send_mouse_wheel_event, send_scancode_event, set_active_session,
+    SessionCallback,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -479,9 +480,14 @@ struct Toast {
     until: Instant,
 }
 
-struct DesktopApp {
-    shared: Arc<SharedUi>,
+/// One connection form + optional live backend session (multi-tab).
+struct ConnectionTab {
+    /// Stable id for egui / texture names.
+    tab_id: u64,
     prefs: Prefs,
+    shared: Arc<SharedUi>,
+    /// Backend session while connecting/connected (also kept after Failed until reconnect).
+    backend_session_id: Option<u64>,
     texture: Option<TextureHandle>,
     last_frame_gen: u64,
     last_mouse: Option<(i32, i32)>,
@@ -490,6 +496,66 @@ struct DesktopApp {
     mod_shift: bool,
     mod_ctrl: bool,
     mod_alt: bool,
+}
+
+impl ConnectionTab {
+    fn new(tab_id: u64, prefs: Prefs) -> Self {
+        Self {
+            tab_id,
+            prefs,
+            shared: SharedUi::new(),
+            backend_session_id: None,
+            texture: None,
+            last_frame_gen: 0,
+            last_mouse: None,
+            left_down: false,
+            right_down: false,
+            mod_shift: false,
+            mod_ctrl: false,
+            mod_alt: false,
+        }
+    }
+
+    fn tab_title(&self) -> String {
+        let host = self.prefs.host.trim();
+        if host.is_empty() {
+            return "New connection".into();
+        }
+        let label = self.prefs.endpoint_label();
+        match *self.shared.state.lock() {
+            ConnectionState::Connecting => format!("… {label}"),
+            ConnectionState::Failed => format!("! {label}"),
+            _ => label,
+        }
+    }
+
+    fn is_busy(&self) -> bool {
+        matches!(
+            *self.shared.state.lock(),
+            ConnectionState::Connecting | ConnectionState::Connected
+        )
+    }
+
+    fn can_connect(&self) -> bool {
+        !self.prefs.host.trim().is_empty()
+            && matches!(
+                *self.shared.state.lock(),
+                ConnectionState::Idle | ConnectionState::Failed
+            )
+    }
+
+    fn can_open_file(&self) -> bool {
+        matches!(
+            *self.shared.state.lock(),
+            ConnectionState::Idle | ConnectionState::Failed
+        )
+    }
+}
+
+struct DesktopApp {
+    tabs: Vec<ConnectionTab>,
+    active_tab: usize,
+    next_tab_id: u64,
 
     // Desktop chrome state
     show_sidebar: bool,
@@ -508,6 +574,8 @@ struct DesktopApp {
     /// While true, host app shortcuts are disabled — only the host key works.
     remote_input_active: bool,
     toast: Option<Toast>,
+    /// Tab id waiting for “close while connected?” confirmation (× / Ctrl+W).
+    pending_close_tab_id: Option<u64>,
 }
 
 /// Host key (VirtualBox/VMware/Remmina style): leave remote keyboard / exit view fullscreen.
@@ -519,17 +587,11 @@ impl DesktopApp {
         init_runtime();
         apply_desktop_style(&cc.egui_ctx);
 
+        let first = ConnectionTab::new(1, Prefs::load());
         Self {
-            shared: SharedUi::new(),
-            prefs: Prefs::load(),
-            texture: None,
-            last_frame_gen: 0,
-            last_mouse: None,
-            left_down: false,
-            right_down: false,
-            mod_shift: false,
-            mod_ctrl: false,
-            mod_alt: false,
+            tabs: vec![first],
+            active_tab: 0,
+            next_tab_id: 2,
             show_sidebar: true,
             show_about: false,
             fit_mode: FitMode::Fit,
@@ -540,6 +602,101 @@ impl DesktopApp {
             view_fs_hint_until: None,
             remote_input_active: false,
             toast: None,
+            pending_close_tab_id: None,
+        }
+    }
+
+    fn tab(&self) -> &ConnectionTab {
+        &self.tabs[self.active_tab]
+    }
+
+    fn tab_mut(&mut self) -> &mut ConnectionTab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    fn select_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        self.active_tab = index;
+        if let Some(sid) = self.tabs[index].backend_session_id {
+            set_active_session(sid);
+        } else {
+            set_active_session(0);
+        }
+    }
+
+    /// Open a blank connection form in a new tab.
+    fn new_connection_tab(&mut self) {
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        self.tabs.push(ConnectionTab::new(id, Prefs::default()));
+        self.select_tab(self.tabs.len() - 1);
+        self.show_sidebar = true;
+        if self.view_fullscreen {
+            // New form needs chrome; leave immersive mode.
+            // Caller may pass ctx — handled where needed.
+        }
+    }
+
+    /// Request closing a tab. Confirms first when the session is connecting/connected.
+    fn request_close_tab(&mut self, index: usize, ctx: &egui::Context) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if self.tabs[index].is_busy() {
+            self.pending_close_tab_id = Some(self.tabs[index].tab_id);
+            // Ensure chrome is visible so the confirm dialog can be used.
+            if self.view_fullscreen {
+                self.exit_view_fullscreen(ctx);
+            }
+            return;
+        }
+        self.close_tab(index, ctx);
+    }
+
+    /// Close a tab: disconnect its backend session, keep at least one tab.
+    fn close_tab(&mut self, index: usize, ctx: &egui::Context) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        // Drop any pending confirm for this (or another) tab.
+        self.pending_close_tab_id = None;
+
+        let was_active = index == self.active_tab;
+        let tab = &self.tabs[index];
+        if let Some(sid) = tab.backend_session_id {
+            disconnect_session_id(sid);
+        }
+
+        self.tabs.remove(index);
+
+        if self.tabs.is_empty() {
+            let id = self.next_tab_id;
+            self.next_tab_id = self.next_tab_id.wrapping_add(1);
+            self.tabs.push(ConnectionTab::new(id, Prefs::default()));
+            self.active_tab = 0;
+            set_active_session(0);
+            self.show_sidebar = true;
+            if self.view_fullscreen {
+                self.exit_view_fullscreen(ctx);
+            }
+            return;
+        }
+
+        if index < self.active_tab {
+            self.active_tab -= 1;
+        } else if self.active_tab >= self.tabs.len() {
+            self.active_tab = self.tabs.len() - 1;
+        }
+
+        self.select_tab(self.active_tab);
+        if was_active && self.view_fullscreen {
+            let busy = self.tab().is_busy();
+            if !busy {
+                self.exit_view_fullscreen(ctx);
+                self.show_sidebar = true;
+            }
         }
     }
 
@@ -615,21 +772,11 @@ impl DesktopApp {
         });
     }
 
-    fn can_open_file(&self) -> bool {
-        matches!(
-            *self.shared.state.lock(),
-            ConnectionState::Idle | ConnectionState::Failed
-        )
-    }
-
     /// Open a native file picker, load `.rdp` / `.vnc`, then connect.
+    /// If the current tab is busy, opens a new tab first.
     fn open_connection(&mut self) {
-        if !self.can_open_file() {
-            self.show_toast(
-                "Disconnect the current session before opening a file",
-                ToastKind::Error,
-            );
-            return;
+        if !self.tab().can_open_file() {
+            self.new_connection_tab();
         }
 
         let Some(path) = rfd::FileDialog::new()
@@ -643,23 +790,27 @@ impl DesktopApp {
             return;
         };
 
-        match Prefs::load_from_connection_file(&path, &self.prefs) {
+        let base = self.tab().prefs.clone();
+        match Prefs::load_from_connection_file(&path, &base) {
             Ok(loaded) => {
-                self.prefs = loaded;
-                self.prefs.save_app_prefs();
                 let msg = format!(
                     "Loaded {} — connecting…",
                     path.file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("connection")
                 );
-                *self.shared.status.lock() = msg.clone();
+                {
+                    let tab = self.tab_mut();
+                    tab.prefs = loaded;
+                    tab.prefs.save_app_prefs();
+                    *tab.shared.status.lock() = msg.clone();
+                }
                 self.show_toast(msg, ToastKind::Info);
                 self.start_connect();
             }
             Err(e) => {
                 let msg = format!("Could not open file: {e}");
-                *self.shared.status.lock() = msg.clone();
+                *self.tab_mut().shared.status.lock() = msg.clone();
                 self.show_toast(msg, ToastKind::Error);
             }
         }
@@ -668,13 +819,13 @@ impl DesktopApp {
     /// Open a native Save dialog so the user can pick path + filename.
     /// RDP → `*.rdp`, VNC → `*.vnc`. Cancel is silent.
     fn save_connection_as(&mut self) {
-        let ext = self.prefs.file_extension();
+        let ext = self.tab().prefs.file_extension();
         let filter_label = if ext == "vnc" {
             "VNC connection"
         } else {
             "RDP connection"
         };
-        let default_name = self.prefs.default_filename();
+        let default_name = self.tab().prefs.default_filename();
 
         let Some(picked) = rfd::FileDialog::new()
             .set_title("Save connection")
@@ -687,52 +838,58 @@ impl DesktopApp {
             return;
         };
 
-        let path = self.prefs.with_correct_extension(picked);
-        let body = self.prefs.to_connection_file();
+        let path = self.tab().prefs.with_correct_extension(picked);
+        let body = self.tab().prefs.to_connection_file();
 
         match std::fs::write(&path, body) {
             Ok(()) => {
                 // Also refresh local app prefs so next launch remembers fields
-                self.prefs.save_app_prefs();
+                self.tab_mut().prefs.save_app_prefs();
                 let msg = format!("Connection saved to {}", path.display());
-                *self.shared.status.lock() = msg.clone();
+                *self.tab_mut().shared.status.lock() = msg.clone();
                 self.show_toast(msg, ToastKind::Success);
             }
             Err(e) => {
                 let msg = format!("Could not save file: {e}");
-                *self.shared.status.lock() = msg.clone();
+                *self.tab_mut().shared.status.lock() = msg.clone();
                 self.show_toast(msg, ToastKind::Error);
             }
         }
     }
 
     fn is_busy(&self) -> bool {
-        matches!(
-            *self.shared.state.lock(),
-            ConnectionState::Connecting | ConnectionState::Connected
-        )
+        self.tab().is_busy()
     }
 
     fn can_connect(&self) -> bool {
-        !self.prefs.host.trim().is_empty()
-            && matches!(
-                *self.shared.state.lock(),
-                ConnectionState::Idle | ConnectionState::Failed
-            )
+        self.tab().can_connect()
+    }
+
+    /// Reset all connection form fields to defaults and persist app prefs.
+    fn clear_form(&mut self) {
+        if self.is_busy() {
+            return;
+        }
+        let tab = self.tab_mut();
+        tab.prefs = Prefs::default();
+        tab.prefs.save_app_prefs();
+        *tab.shared.status.lock() = "Form cleared".into();
+        self.show_toast("Form cleared", ToastKind::Info);
     }
 
     fn sync_modifiers(&mut self, modifiers: egui::Modifiers) {
-        if modifiers.shift != self.mod_shift {
+        let tab = self.tab_mut();
+        if modifiers.shift != tab.mod_shift {
             send_scancode_event(0x2A, false, if modifiers.shift { 1 } else { 0 });
-            self.mod_shift = modifiers.shift;
+            tab.mod_shift = modifiers.shift;
         }
-        if modifiers.ctrl != self.mod_ctrl {
+        if modifiers.ctrl != tab.mod_ctrl {
             send_scancode_event(0x1D, false, if modifiers.ctrl { 1 } else { 0 });
-            self.mod_ctrl = modifiers.ctrl;
+            tab.mod_ctrl = modifiers.ctrl;
         }
-        if modifiers.alt != self.mod_alt {
+        if modifiers.alt != tab.mod_alt {
             send_scancode_event(0x38, false, if modifiers.alt { 1 } else { 0 });
-            self.mod_alt = modifiers.alt;
+            tab.mod_alt = modifiers.alt;
         }
     }
 
@@ -740,48 +897,67 @@ impl DesktopApp {
         if !self.can_connect() {
             return;
         }
-        self.prefs.save_app_prefs();
 
-        let default_port = if self.prefs.mode == "VNC" { 5900 } else { 3389 };
-        let port = self.prefs.port.parse::<i32>().unwrap_or(default_port);
-        let width = self.prefs.width.parse::<i32>().unwrap_or(1920).clamp(640, 7680);
-        let height = self.prefs.height.parse::<i32>().unwrap_or(1080).clamp(480, 4320);
+        // Drop any leftover backend session from a prior Failed attempt on this tab.
+        if let Some(old) = self.tab_mut().backend_session_id.take() {
+            disconnect_session_id(old);
+        }
+
+        self.tab_mut().prefs.save_app_prefs();
+
+        let (host, port, username, password, domain, mode, width, height, endpoint, shared) = {
+            let tab = self.tab();
+            let default_port = if tab.prefs.mode == "VNC" { 5900 } else { 3389 };
+            let port = tab.prefs.port.parse::<i32>().unwrap_or(default_port);
+            let width = tab.prefs.width.parse::<i32>().unwrap_or(1920).clamp(640, 7680);
+            let height = tab
+                .prefs
+                .height
+                .parse::<i32>()
+                .unwrap_or(1080)
+                .clamp(480, 4320);
+            (
+                tab.prefs.host.trim().to_string(),
+                port,
+                tab.prefs.username.clone(),
+                tab.prefs.password.clone(),
+                tab.prefs.domain.clone(),
+                tab.prefs.mode.clone(),
+                width,
+                height,
+                tab.prefs.endpoint_label(),
+                tab.shared.clone(),
+            )
+        };
 
         {
-            let mut frame = self.shared.frame.lock();
+            let mut frame = shared.frame.lock();
             frame.resize(width, height);
         }
-        *self.shared.state.lock() = ConnectionState::Connecting;
-        *self.shared.status.lock() =
-            format!("Connecting to {} via {}…", self.prefs.endpoint_label(), self.prefs.mode);
+        *shared.state.lock() = ConnectionState::Connecting;
+        *shared.status.lock() = format!("Connecting to {endpoint} via {mode}…");
 
         let cb: Arc<dyn SessionCallback> = Arc::new(UiCallback {
-            ui: self.shared.clone(),
+            ui: shared.clone(),
         });
 
-        connect_session(
-            self.prefs.host.trim().to_string(),
-            port,
-            self.prefs.username.clone(),
-            self.prefs.password.clone(),
-            self.prefs.domain.clone(),
-            width,
-            height,
-            self.prefs.mode.clone(),
-            cb,
+        let session_id = connect_session(
+            host, port, username, password, domain, width, height, mode, cb,
         );
-
-        // When connected, free horizontal space for the session
-        // (sidebar stays available via View menu / toolbar toggle)
+        self.tab_mut().backend_session_id = Some(session_id);
     }
 
+    /// Disconnect the active tab's session (keeps the tab / form).
     fn disconnect(&mut self, ctx: &egui::Context) {
-        disconnect_session();
-        *self.shared.state.lock() = ConnectionState::Idle;
-        *self.shared.status.lock() = "Disconnected".into();
-        self.left_down = false;
-        self.right_down = false;
-        self.last_mouse = None;
+        if let Some(sid) = self.tab_mut().backend_session_id.take() {
+            disconnect_session_id(sid);
+        }
+        let tab = self.tab_mut();
+        *tab.shared.state.lock() = ConnectionState::Idle;
+        *tab.shared.status.lock() = "Disconnected".into();
+        tab.left_down = false;
+        tab.right_down = false;
+        tab.last_mouse = None;
         if self.view_fullscreen {
             self.exit_view_fullscreen(ctx);
         }
@@ -789,21 +965,23 @@ impl DesktopApp {
     }
 
     fn ensure_texture(&mut self, ctx: &egui::Context) {
-        if !self.shared.dirty.swap(false, Ordering::Relaxed) && self.texture.is_some() {
+        let tab = self.tab_mut();
+        if !tab.shared.dirty.swap(false, Ordering::Relaxed) && tab.texture.is_some() {
             return;
         }
-        let frame = self.shared.frame.lock();
-        if frame.generation == self.last_frame_gen && self.texture.is_some() {
+        let frame = tab.shared.frame.lock();
+        if frame.generation == tab.last_frame_gen && tab.texture.is_some() {
             return;
         }
-        self.last_frame_gen = frame.generation;
+        tab.last_frame_gen = frame.generation;
         let image = frame.to_color_image();
         drop(frame);
 
-        match &mut self.texture {
+        let tex_name = format!("rdp_frame_{}", tab.tab_id);
+        match &mut tab.texture {
             Some(tex) => tex.set(image, TextureOptions::LINEAR),
             None => {
-                self.texture = Some(ctx.load_texture("rdp_frame", image, TextureOptions::LINEAR));
+                tab.texture = Some(ctx.load_texture(tex_name, image, TextureOptions::LINEAR));
             }
         }
     }
@@ -812,7 +990,7 @@ impl DesktopApp {
         if !rect.contains(pointer) {
             return None;
         }
-        let frame = self.shared.frame.lock();
+        let frame = self.tab().shared.frame.lock();
         let fw = frame.width as f32;
         let fh = frame.height as f32;
         if fw <= 0.0 || fh <= 0.0 || rect.width() <= 0.0 || rect.height() <= 0.0 {
@@ -827,17 +1005,26 @@ impl DesktopApp {
     // ── Menu bar ────────────────────────────────────────────────────────────
 
     fn ui_menu_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let state = *self.shared.state.lock();
+        let state = *self.tab().shared.state.lock();
         let connected = state == ConnectionState::Connected;
         let connecting = state == ConnectionState::Connecting;
 
         egui::menu::bar(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui
-                    .add_enabled(
-                        self.can_open_file(),
-                        egui::Button::new("Open connection…\tCtrl+O"),
-                    )
+                    .button("New connection\tCtrl+T")
+                    .on_hover_text("Open a new connection tab")
+                    .clicked()
+                {
+                    self.new_connection_tab();
+                    if self.view_fullscreen {
+                        self.exit_view_fullscreen(ctx);
+                    }
+                    ui.close_menu();
+                }
+                if ui
+                    .button("Open connection…\tCtrl+O")
+                    .on_hover_text("Open a .rdp / .vnc file (new tab if current session is active)")
                     .clicked()
                 {
                     self.open_connection();
@@ -860,9 +1047,26 @@ impl DesktopApp {
                     self.disconnect(ctx);
                     ui.close_menu();
                 }
+                if ui
+                    .button("Close tab\tCtrl+W")
+                    .on_hover_text("Close this tab and disconnect its session")
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    self.request_close_tab(idx, ctx);
+                    ui.close_menu();
+                }
                 ui.separator();
                 if ui.button("Save connection as…\tCtrl+S").clicked() {
                     self.save_connection_as();
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(!self.is_busy(), egui::Button::new("Clear form"))
+                    .on_hover_text("Reset all connection fields to defaults")
+                    .clicked()
+                {
+                    self.clear_form();
                     ui.close_menu();
                 }
                 ui.separator();
@@ -931,9 +1135,11 @@ impl DesktopApp {
     // ── Toolbar ─────────────────────────────────────────────────────────────
 
     fn ui_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let state = *self.shared.state.lock();
+        let state = *self.tab().shared.state.lock();
         let connected = state == ConnectionState::Connected;
         let connecting = state == ConnectionState::Connecting;
+        let can_connect = self.can_connect();
+        let tab_id = self.tab().tab_id;
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
@@ -945,6 +1151,19 @@ impl DesktopApp {
                 .clicked()
             {
                 self.show_sidebar = !self.show_sidebar;
+            }
+
+            ui.separator();
+
+            if ui
+                .button("+ New")
+                .on_hover_text("New connection tab (Ctrl+T)")
+                .clicked()
+            {
+                self.new_connection_tab();
+                if self.view_fullscreen {
+                    self.exit_view_fullscreen(ctx);
+                }
             }
 
             ui.separator();
@@ -967,10 +1186,7 @@ impl DesktopApp {
                 }
             } else {
                 if ui
-                    .add_enabled(
-                        self.can_open_file(),
-                        egui::Button::new("Open"),
-                    )
+                    .button("Open")
                     .on_hover_text("Open a .rdp / .vnc file and connect (Ctrl+O)")
                     .clicked()
                 {
@@ -978,13 +1194,13 @@ impl DesktopApp {
                 }
 
                 let btn = egui::Button::new(RichText::new("Connect").strong().color(Color32::WHITE))
-                    .fill(if self.can_connect() {
+                    .fill(if can_connect {
                         theme::ACCENT
                     } else {
                         theme::BORDER
                     });
                 if ui
-                    .add_enabled(self.can_connect(), btn)
+                    .add_enabled(can_connect, btn)
                     .on_hover_text("Connect to the remote host (Ctrl+Return)")
                     .clicked()
                 {
@@ -994,41 +1210,42 @@ impl DesktopApp {
 
             ui.separator();
 
-            // Protocol
-            ui.label(RichText::new("Protocol").color(theme::TEXT_DIM).small());
-            egui::ComboBox::from_id_salt("proto")
-                .selected_text(&self.prefs.mode)
-                .width(72.0)
-                .show_ui(ui, |ui| {
-                    for mode in ["RDP", "VNC"] {
-                        if ui
-                            .selectable_value(&mut self.prefs.mode, mode.to_string(), mode)
-                            .clicked()
-                        {
-                            if mode == "VNC" && self.prefs.port == "3389" {
-                                self.prefs.port = "5900".into();
-                            } else if mode == "RDP" && self.prefs.port == "5900" {
-                                self.prefs.port = "3389".into();
+            // Protocol / host / port for the active tab
+            let fields_enabled = !(connected || connecting);
+            {
+                let tab = self.tab_mut();
+                ui.label(RichText::new("Protocol").color(theme::TEXT_DIM).small());
+                egui::ComboBox::from_id_salt(format!("proto_{tab_id}"))
+                    .selected_text(&tab.prefs.mode)
+                    .width(72.0)
+                    .show_ui(ui, |ui| {
+                        for mode in ["RDP", "VNC"] {
+                            if ui
+                                .selectable_value(&mut tab.prefs.mode, mode.to_string(), mode)
+                                .clicked()
+                            {
+                                if mode == "VNC" && tab.prefs.port == "3389" {
+                                    tab.prefs.port = "5900".into();
+                                } else if mode == "RDP" && tab.prefs.port == "5900" {
+                                    tab.prefs.port = "3389".into();
+                                }
                             }
                         }
-                    }
-                });
+                    });
 
-            // Quick host field on toolbar
-            let fields_enabled = !(connected || connecting);
-            ui.label(RichText::new("Host").color(theme::TEXT_DIM).small());
-            ui.add(
-                egui::TextEdit::singleline(&mut self.prefs.host)
-                    .desired_width(180.0)
-                    .hint_text("hostname or IP")
-                    .interactive(fields_enabled),
-            );
-            ui.label(RichText::new("Port").color(theme::TEXT_DIM).small());
-            ui.add(
-                egui::TextEdit::singleline(&mut self.prefs.port)
-                    .desired_width(56.0)
-                    .interactive(fields_enabled),
-            );
+                ui.label(RichText::new("Host").color(theme::TEXT_DIM).small());
+                ui.add(
+                    egui::TextEdit::singleline(&mut tab.prefs.host)
+                        .desired_width(180.0)
+                        .interactive(fields_enabled),
+                );
+                ui.label(RichText::new("Port").color(theme::TEXT_DIM).small());
+                ui.add(
+                    egui::TextEdit::singleline(&mut tab.prefs.port)
+                        .desired_width(56.0)
+                        .interactive(fields_enabled),
+                );
+            }
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
@@ -1074,10 +1291,182 @@ impl DesktopApp {
         });
     }
 
+    // ── Tab bar ─────────────────────────────────────────────────────────────
+
+    fn ui_tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut select: Option<usize> = None;
+        let mut close: Option<usize> = None;
+        let mut new_tab = false;
+
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+
+            for (i, tab) in self.tabs.iter().enumerate() {
+                let selected = i == self.active_tab;
+                let title = tab.tab_title();
+                let state = *tab.shared.state.lock();
+
+                let fill = if selected {
+                    theme::PANEL_ALT
+                } else {
+                    theme::PANEL
+                };
+                let stroke = if selected {
+                    egui::Stroke::new(1.0_f32, theme::ACCENT)
+                } else {
+                    egui::Stroke::new(1.0_f32, theme::BORDER)
+                };
+
+                egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 6.0;
+                            // Status dot
+                            let (dot, _) =
+                                ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
+                            ui.painter()
+                                .circle_filled(dot.center(), 3.0, state.color());
+
+                            let label = RichText::new(title).small();
+                            if ui
+                                .add(egui::Label::new(if selected {
+                                    label.strong().color(theme::TEXT)
+                                } else {
+                                    label.color(theme::TEXT_DIM)
+                                }).sense(egui::Sense::click()))
+                                .on_hover_text("Switch to this connection")
+                                .clicked()
+                            {
+                                select = Some(i);
+                            }
+
+                            let close_resp = ui
+                                .add(
+                                    egui::Button::new(RichText::new("×").size(14.0))
+                                        .frame(false)
+                                        .min_size(Vec2::new(16.0, 16.0)),
+                                )
+                                .on_hover_text("Close tab and disconnect");
+                            if close_resp.clicked() {
+                                close = Some(i);
+                            }
+                        });
+                    });
+            }
+
+            if ui
+                .add(
+                    egui::Button::new(RichText::new("+").strong())
+                        .min_size(Vec2::new(28.0, 24.0)),
+                )
+                .on_hover_text("New connection (Ctrl+T)")
+                .clicked()
+            {
+                new_tab = true;
+            }
+        });
+
+        if let Some(i) = select {
+            self.select_tab(i);
+        }
+        if let Some(i) = close {
+            self.request_close_tab(i, ctx);
+        }
+        if new_tab {
+            self.new_connection_tab();
+            if self.view_fullscreen {
+                self.exit_view_fullscreen(ctx);
+            }
+        }
+    }
+
+    fn ui_close_tab_confirm(&mut self, ctx: &egui::Context) {
+        let Some(tab_id) = self.pending_close_tab_id else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|t| t.tab_id == tab_id) else {
+            self.pending_close_tab_id = None;
+            return;
+        };
+
+        // Session may have ended while the dialog was open — close without asking.
+        if !self.tabs[index].is_busy() {
+            self.close_tab(index, ctx);
+            return;
+        }
+
+        let title = self.tabs[index].tab_title();
+        let state = *self.tabs[index].shared.state.lock();
+        let state_label = match state {
+            ConnectionState::Connecting => "still connecting",
+            ConnectionState::Connected => "connected",
+            _ => "active",
+        };
+
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new("Close connection?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_min_width(340.0);
+                ui.label(
+                    RichText::new(format!("“{title}” is {state_label}."))
+                        .strong(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("Closing this tab will disconnect the remote session.")
+                        .color(theme::TEXT_DIM),
+                );
+                ui.add_space(14.0);
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let close_btn = egui::Button::new(
+                            RichText::new("Close & disconnect")
+                                .strong()
+                                .color(Color32::WHITE),
+                        )
+                        .fill(theme::DANGER);
+                        if ui.add(close_btn).clicked() {
+                            confirmed = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancelled = true;
+                        }
+                    });
+                });
+            });
+
+        if confirmed {
+            self.close_tab(index, ctx);
+        } else if cancelled || !open {
+            self.pending_close_tab_id = None;
+        }
+    }
+
     // ── Connection sidebar ──────────────────────────────────────────────────
 
     fn ui_sidebar(&mut self, ui: &mut egui::Ui) {
         let busy = self.is_busy();
+        let tab_id = self.tab().tab_id;
+        let can_connect = self.can_connect();
+        let file_ext = self.tab().prefs.file_extension();
+        let is_rdp = self.tab().prefs.mode == "RDP";
+        let state = *self.tab().shared.state.lock();
+        let fail_msg = if state == ConnectionState::Failed {
+            Some(self.tab().shared.status.lock().clone())
+        } else {
+            None
+        };
 
         ui.add_space(4.0);
         ui.label(RichText::new("Connection").strong().size(14.0));
@@ -1090,148 +1479,152 @@ impl DesktopApp {
         ui.separator();
         ui.add_space(8.0);
 
-        egui::Grid::new("conn_grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                ui.label(RichText::new("Protocol").color(theme::TEXT_DIM));
-                ui.add_enabled_ui(!busy, |ui| {
-                    ui.horizontal(|ui| {
-                        for mode in ["RDP", "VNC"] {
-                            if ui
-                                .selectable_value(&mut self.prefs.mode, mode.to_string(), mode)
-                                .clicked()
-                            {
-                                if mode == "VNC" && self.prefs.port == "3389" {
-                                    self.prefs.port = "5900".into();
-                                } else if mode == "RDP" && self.prefs.port == "5900" {
-                                    self.prefs.port = "3389".into();
+        {
+            let tab = self.tab_mut();
+            egui::Grid::new(format!("conn_grid_{tab_id}"))
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .min_col_width(80.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Protocol").color(theme::TEXT_DIM));
+                    ui.add_enabled_ui(!busy, |ui| {
+                        ui.horizontal(|ui| {
+                            for mode in ["RDP", "VNC"] {
+                                if ui
+                                    .selectable_value(&mut tab.prefs.mode, mode.to_string(), mode)
+                                    .clicked()
+                                {
+                                    if mode == "VNC" && tab.prefs.port == "3389" {
+                                        tab.prefs.port = "5900".into();
+                                    } else if mode == "RDP" && tab.prefs.port == "5900" {
+                                        tab.prefs.port = "3389".into();
+                                    }
                                 }
                             }
-                        }
+                        });
                     });
-                });
-                ui.end_row();
+                    ui.end_row();
 
-                ui.label(RichText::new("Host").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.host)
-                        .desired_width(f32::INFINITY)
-                        .hint_text("192.168.1.10"),
-                );
-                ui.end_row();
-
-                ui.label(RichText::new("Port").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.port).desired_width(80.0),
-                );
-                ui.end_row();
-
-                if self.prefs.mode == "RDP" {
-                    ui.label(RichText::new("Domain").color(theme::TEXT_DIM));
+                    ui.label(RichText::new("Host").color(theme::TEXT_DIM));
                     ui.add_enabled(
                         !busy,
-                        egui::TextEdit::singleline(&mut self.prefs.domain)
-                            .desired_width(f32::INFINITY)
-                            .hint_text("optional"),
+                        egui::TextEdit::singleline(&mut tab.prefs.host)
+                            .desired_width(f32::INFINITY),
                     );
                     ui.end_row();
-                }
 
-                ui.label(RichText::new("Username").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.username)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
+                    ui.label(RichText::new("Port").color(theme::TEXT_DIM));
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut tab.prefs.port).desired_width(80.0),
+                    );
+                    ui.end_row();
 
-                ui.label(RichText::new("Password").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.password)
-                        .password(true)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.end_row();
-            });
-
-        ui.add_space(16.0);
-        ui.label(RichText::new("Display").strong().size(14.0));
-        ui.add_space(6.0);
-        ui.separator();
-        ui.add_space(8.0);
-
-        egui::Grid::new("display_grid")
-            .num_columns(2)
-            .spacing([12.0, 8.0])
-            .min_col_width(80.0)
-            .show(ui, |ui| {
-                ui.label(RichText::new("Width").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.width).desired_width(80.0),
-                );
-                ui.end_row();
-
-                ui.label(RichText::new("Height").color(theme::TEXT_DIM));
-                ui.add_enabled(
-                    !busy,
-                    egui::TextEdit::singleline(&mut self.prefs.height).desired_width(80.0),
-                );
-                ui.end_row();
-            });
-
-        ui.add_space(6.0);
-        ui.horizontal(|ui| {
-            ui.add_enabled_ui(!busy, |ui| {
-                for (label, w, h) in [
-                    ("1280×720", "1280", "720"),
-                    ("1920×1080", "1920", "1080"),
-                    ("2560×1440", "2560", "1440"),
-                ] {
-                    if ui.small_button(label).clicked() {
-                        self.prefs.width = w.into();
-                        self.prefs.height = h.into();
+                    if is_rdp {
+                        ui.label(RichText::new("Domain").color(theme::TEXT_DIM));
+                        ui.add_enabled(
+                            !busy,
+                            egui::TextEdit::singleline(&mut tab.prefs.domain)
+                                .desired_width(f32::INFINITY)
+                                .hint_text("optional"),
+                        );
+                        ui.end_row();
                     }
-                }
-            });
-        });
 
-        ui.add_space(12.0);
-        if ui
-            .add(
-                egui::Button::new(format!(
-                    "Save as .{}…",
-                    self.prefs.file_extension()
-                ))
-                .min_size(Vec2::new(ui.available_width(), 28.0)),
-            )
-            .on_hover_text(format!(
-                "Save a .{} connection file (Ctrl+S)",
-                self.prefs.file_extension()
-            ))
-            .clicked()
-        {
-            self.save_connection_as();
+                    ui.label(RichText::new("Username").color(theme::TEXT_DIM));
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut tab.prefs.username)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Password").color(theme::TEXT_DIM));
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut tab.prefs.password)
+                            .password(true)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.end_row();
+                });
+
+            ui.add_space(16.0);
+            ui.label(RichText::new("Display").strong().size(14.0));
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(8.0);
+
+            egui::Grid::new(format!("display_grid_{tab_id}"))
+                .num_columns(2)
+                .spacing([12.0, 8.0])
+                .min_col_width(80.0)
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Width").color(theme::TEXT_DIM));
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut tab.prefs.width).desired_width(80.0),
+                    );
+                    ui.end_row();
+
+                    ui.label(RichText::new("Height").color(theme::TEXT_DIM));
+                    ui.add_enabled(
+                        !busy,
+                        egui::TextEdit::singleline(&mut tab.prefs.height).desired_width(80.0),
+                    );
+                    ui.end_row();
+                });
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(!busy, |ui| {
+                    for (label, w, h) in [
+                        ("1280×720", "1280", "720"),
+                        ("1920×1080", "1920", "1080"),
+                        ("2560×1440", "2560", "1440"),
+                    ] {
+                        if ui.small_button(label).clicked() {
+                            tab.prefs.width = w.into();
+                            tab.prefs.height = h.into();
+                        }
+                    }
+                });
+            });
         }
 
         ui.add_space(12.0);
+        ui.horizontal(|ui| {
+            let half = (ui.available_width() - ui.spacing().item_spacing.x).max(0.0) / 2.0;
+            if ui
+                .add(
+                    egui::Button::new(format!("Save as .{file_ext}…"))
+                        .min_size(Vec2::new(half, 28.0)),
+                )
+                .on_hover_text(format!("Save a .{file_ext} connection file (Ctrl+S)"))
+                .clicked()
+            {
+                self.save_connection_as();
+            }
+            if ui
+                .add_enabled(
+                    !busy,
+                    egui::Button::new("Clear form").min_size(Vec2::new(half, 28.0)),
+                )
+                .on_hover_text("Reset all connection fields to defaults")
+                .clicked()
+            {
+                self.clear_form();
+            }
+        });
 
-        let state = *self.shared.state.lock();
+        ui.add_space(12.0);
+
         match state {
             ConnectionState::Idle | ConnectionState::Failed => {
                 ui.horizontal(|ui| {
                     let half = (ui.available_width() - ui.spacing().item_spacing.x).max(0.0) / 2.0;
                     if ui
-                        .add_enabled(
-                            self.can_open_file(),
-                            egui::Button::new("Open")
-                                .min_size(Vec2::new(half, 32.0)),
-                        )
+                        .add(egui::Button::new("Open").min_size(Vec2::new(half, 32.0)))
                         .on_hover_text("Open a .rdp / .vnc file and connect (Ctrl+O)")
                         .clicked()
                     {
@@ -1242,7 +1635,7 @@ impl DesktopApp {
                     )
                     .fill(theme::ACCENT)
                     .min_size(Vec2::new(half, 32.0));
-                    if ui.add_enabled(self.can_connect(), btn).clicked() {
+                    if ui.add_enabled(can_connect, btn).clicked() {
                         self.start_connect();
                     }
                 });
@@ -1280,9 +1673,8 @@ impl DesktopApp {
             }
         }
 
-        if state == ConnectionState::Failed {
+        if let Some(msg) = fail_msg {
             ui.add_space(10.0);
-            let msg = self.shared.status.lock().clone();
             egui::Frame::new()
                 .fill(theme::ERROR_BG)
                 .stroke(egui::Stroke::new(1.0_f32, theme::DANGER))
@@ -1299,7 +1691,7 @@ impl DesktopApp {
             ui.add_space(8.0);
             ui.label(
                 RichText::new(
-                    "Ctrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\nCtrl+Alt+Enter    Host key (exit view FS)\n\nWhile the remote view has focus,\nhost shortcuts are disabled.",
+                    "Ctrl+T            New connection\nCtrl+W            Close tab\nCtrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\nCtrl+Alt+Enter    Host key (exit view FS)\n\nWhile the remote view has focus,\nhost shortcuts are disabled.",
                 )
                 .small()
                 .monospace()
@@ -1311,12 +1703,18 @@ impl DesktopApp {
     // ── Status bar ──────────────────────────────────────────────────────────
 
     fn ui_status_bar(&self, ui: &mut egui::Ui) {
-        let state = *self.shared.state.lock();
-        let status = self.shared.status.lock().clone();
+        let tab = self.tab();
+        let state = *tab.shared.state.lock();
+        let status = tab.shared.status.lock().clone();
         let (fw, fh) = {
-            let f = self.shared.frame.lock();
+            let f = tab.shared.frame.lock();
             (f.width, f.height)
         };
+        let mode = tab.prefs.mode.clone();
+        let host_empty = tab.prefs.host.is_empty();
+        let endpoint = tab.prefs.endpoint_label();
+        let tab_n = self.tabs.len();
+        let tab_i = self.active_tab + 1;
 
         ui.horizontal(|ui| {
             // Status indicator
@@ -1331,13 +1729,19 @@ impl DesktopApp {
                     .small(),
             );
             ui.separator();
+            ui.label(
+                RichText::new(format!("Tab {tab_i}/{tab_n}"))
+                    .small()
+                    .color(theme::TEXT_DIM),
+            );
+            ui.separator();
             ui.label(RichText::new(status).small().color(theme::TEXT_DIM));
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
                     RichText::new(format!(
                         "{}  ·  {}×{}  ·  zoom {:.0}%",
-                        self.prefs.mode,
+                        mode,
                         fw,
                         fh,
                         self.zoom * 100.0
@@ -1346,10 +1750,10 @@ impl DesktopApp {
                     .monospace()
                     .color(theme::TEXT_DIM),
                 );
-                if !self.prefs.host.is_empty() {
+                if !host_empty {
                     ui.separator();
                     ui.label(
-                        RichText::new(self.prefs.endpoint_label())
+                        RichText::new(endpoint)
                             .small()
                             .monospace()
                             .color(theme::TEXT_DIM),
@@ -1362,20 +1766,21 @@ impl DesktopApp {
     // ── Remote viewport ─────────────────────────────────────────────────────
 
     fn ui_viewport(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let state = *self.shared.state.lock();
+        let state = *self.tab().shared.state.lock();
 
         match state {
             ConnectionState::Idle | ConnectionState::Failed => {
                 self.ui_empty_canvas(ui);
             }
             ConnectionState::Connecting => {
+                let status = self.tab().shared.status.lock().clone();
                 ui.centered_and_justified(|ui| {
                     ui.vertical_centered(|ui| {
                         ui.spinner();
                         ui.add_space(12.0);
                         ui.label(RichText::new("Establishing session…").size(15.0));
                         ui.label(
-                            RichText::new(self.shared.status.lock().clone())
+                            RichText::new(status)
                                 .color(theme::TEXT_DIM)
                                 .small(),
                         );
@@ -1389,6 +1794,8 @@ impl DesktopApp {
     }
 
     fn ui_empty_canvas(&mut self, ui: &mut egui::Ui) {
+        let can_connect = self.can_connect();
+        let endpoint = self.tab().prefs.endpoint_label();
         ui.centered_and_justified(|ui| {
             ui.vertical_centered(|ui| {
                 ui.label(
@@ -1402,15 +1809,20 @@ impl DesktopApp {
                         .color(theme::TEXT_DIM)
                         .small(),
                 );
+                ui.add_space(8.0);
+                ui.label(
+                    RichText::new("Use + New or Ctrl+T for another concurrent connection.")
+                        .color(theme::TEXT_DIM)
+                        .small(),
+                );
                 ui.add_space(16.0);
                 if !self.show_sidebar {
                     if ui.button("Show connection panel").clicked() {
                         self.show_sidebar = true;
                     }
-                } else if self.can_connect() {
+                } else if can_connect {
                     let btn = egui::Button::new(
-                        RichText::new(format!("Connect to {}", self.prefs.endpoint_label()))
-                            .color(Color32::WHITE),
+                        RichText::new(format!("Connect to {endpoint}")).color(Color32::WHITE),
                     )
                     .fill(theme::ACCENT);
                     if ui.add(btn).clicked() {
@@ -1424,13 +1836,13 @@ impl DesktopApp {
     fn ui_remote_session(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         self.ensure_texture(ctx);
 
-        let Some(tex) = self.texture.clone() else {
+        let Some(tex) = self.tab().texture.clone() else {
             ui.centered_and_justified(|ui| ui.label("Waiting for first frame…"));
             return;
         };
 
         let frame_size = {
-            let f = self.shared.frame.lock();
+            let f = self.tab().shared.frame.lock();
             Vec2::new(f.width as f32, f.height as f32)
         };
 
@@ -1487,7 +1899,7 @@ impl DesktopApp {
         raw_scroll: Vec2,
     ) {
         let connected = matches!(
-            *self.shared.state.lock(),
+            *self.tab().shared.state.lock(),
             ConnectionState::Connected | ConnectionState::Connecting
         );
         let view_focused = response.has_focus() || response.hovered();
@@ -1505,13 +1917,14 @@ impl DesktopApp {
 
         if let Some(pos) = pointer {
             if let Some((x, y)) = self.remote_pos(pos, rect) {
-                let moved = self
+                let tab = self.tab_mut();
+                let moved = tab
                     .last_mouse
                     .map(|(lx, ly)| lx != x || ly != y)
                     .unwrap_or(true);
                 if moved {
                     send_mouse_event(x, y, 0);
-                    self.last_mouse = Some((x, y));
+                    tab.last_mouse = Some((x, y));
                 }
 
                 let buttons = ui.ctx().input(|i| {
@@ -1525,19 +1938,19 @@ impl DesktopApp {
 
                 if buttons.0 {
                     send_mouse_event(x, y, 1);
-                    self.left_down = true;
+                    tab.left_down = true;
                 }
-                if buttons.1 && self.left_down {
+                if buttons.1 && tab.left_down {
                     send_mouse_event(x, y, 2);
-                    self.left_down = false;
+                    tab.left_down = false;
                 }
                 if buttons.2 {
                     send_mouse_event(x, y, 3);
-                    self.right_down = true;
+                    tab.right_down = true;
                 }
-                if buttons.3 && self.right_down {
+                if buttons.3 && tab.right_down {
                     send_mouse_event(x, y, 4);
-                    self.right_down = false;
+                    tab.right_down = false;
                 }
 
                 // Wheel → always remote when over the surface
@@ -1568,17 +1981,18 @@ impl DesktopApp {
         // Host key must not be injected into the remote session
         let host_key_this_frame = ui.input(|i| Self::is_host_key_pressed(i));
         if host_key_this_frame {
-            if self.mod_ctrl {
+            let tab = self.tab_mut();
+            if tab.mod_ctrl {
                 send_scancode_event(0x1D, false, 0);
-                self.mod_ctrl = false;
+                tab.mod_ctrl = false;
             }
-            if self.mod_alt {
+            if tab.mod_alt {
                 send_scancode_event(0x38, false, 0);
-                self.mod_alt = false;
+                tab.mod_alt = false;
             }
-            if self.mod_shift {
+            if tab.mod_shift {
                 send_scancode_event(0x2A, false, 0);
-                self.mod_shift = false;
+                tab.mod_shift = false;
             }
             return;
         }
@@ -1626,7 +2040,7 @@ impl DesktopApp {
         if ctx.input(|i| Self::is_host_key_pressed(i)) {
             if self.view_fullscreen {
                 self.exit_view_fullscreen(ctx);
-            } else if matches!(*self.shared.state.lock(), ConnectionState::Connected) {
+            } else if matches!(*self.tab().shared.state.lock(), ConnectionState::Connected) {
                 self.enter_view_fullscreen(ctx);
             }
             return;
@@ -1642,6 +2056,8 @@ impl DesktopApp {
         let mut quit = false;
         let mut save = false;
         let mut open = false;
+        let mut new_tab = false;
+        let mut close_tab = false;
         let mut zoom_in = false;
         let mut zoom_out = false;
 
@@ -1662,6 +2078,12 @@ impl DesktopApp {
             if i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::O) {
                 open = true;
             }
+            if i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::T) {
+                new_tab = true;
+            }
+            if i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::W) {
+                close_tab = true;
+            }
             if i.modifiers.ctrl
                 && !i.modifiers.alt
                 && (i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals))
@@ -1681,6 +2103,16 @@ impl DesktopApp {
         }
         if disconnect {
             self.disconnect(ctx);
+        }
+        if new_tab {
+            self.new_connection_tab();
+            if self.view_fullscreen {
+                self.exit_view_fullscreen(ctx);
+            }
+        }
+        if close_tab {
+            let idx = self.active_tab;
+            self.request_close_tab(idx, ctx);
         }
         if save {
             self.save_connection_as();
@@ -1865,10 +2297,18 @@ fn apply_desktop_style(ctx: &egui::Context) {
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let state = *self.shared.state.lock();
-        if state == ConnectionState::Connected || state == ConnectionState::Connecting {
+        // Repaint while any tab has an active session (background tabs still receive frames).
+        let any_live = self.tabs.iter().any(|t| {
+            matches!(
+                *t.shared.state.lock(),
+                ConnectionState::Connected | ConnectionState::Connecting
+            )
+        });
+        if any_live {
             ctx.request_repaint_after(std::time::Duration::from_millis(16));
         }
+
+        let state = *self.tab().shared.state.lock();
 
         // Reset each frame; remote view sets this when it owns keyboard focus.
         self.remote_input_active = false;
@@ -1877,9 +2317,11 @@ impl eframe::App for DesktopApp {
         let title = if state == ConnectionState::Connected {
             format!(
                 "{} — {} — Rust RDP VNC",
-                self.prefs.endpoint_label(),
-                self.prefs.mode
+                self.tab().prefs.endpoint_label(),
+                self.tab().prefs.mode
             )
+        } else if self.tabs.len() > 1 {
+            format!("Rust RDP VNC ({} tabs)", self.tabs.len())
         } else {
             "Rust RDP VNC".into()
         };
@@ -1887,7 +2329,7 @@ impl eframe::App for DesktopApp {
 
         // View fullscreen: only the remote canvas — no menu / toolbar / sidebar / status.
         if !self.view_fullscreen {
-            // ── Menu + toolbar ──────────────────────────────────────────────
+            // ── Menu + toolbar + tabs ───────────────────────────────────────
             egui::TopBottomPanel::top("chrome")
                 .frame(
                     egui::Frame::new()
@@ -1901,6 +2343,10 @@ impl eframe::App for DesktopApp {
                     ui.separator();
                     ui.add_space(2.0);
                     self.ui_toolbar(ui, ctx);
+                    ui.add_space(2.0);
+                    ui.separator();
+                    ui.add_space(2.0);
+                    self.ui_tab_bar(ui, ctx);
                 });
 
             // ── Status bar ──────────────────────────────────────────────────
@@ -1972,6 +2418,9 @@ impl eframe::App for DesktopApp {
                     );
                 });
         }
+
+        // Close-tab confirm when session is still connecting/connected
+        self.ui_close_tab_confirm(ctx);
 
         // Floating toast (save feedback, errors, …)
         self.ui_toast(ctx);
