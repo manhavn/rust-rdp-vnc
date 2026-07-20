@@ -27,8 +27,12 @@
   <url type="vcs-browser">https://github.com/manhavn/rust-rdp-vnc</url>
   <screenshots>
     <screenshot type="default">
-      <caption>Rust RDP VNC connection panel and remote desktop view</caption>
-      <image type="source" width="1400" height="900">https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/main.png</image>
+      <caption>Connection panel and session setup</caption>
+      <image type="source" width="1920" height="1013">https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/connection.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Active remote desktop session</caption>
+      <image type="source" width="1920" height="1013">https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/session.png</image>
     </screenshot>
   </screenshots>
   <releases>

@@ -519,7 +519,10 @@ if [[ "$UPSTREAM_WEB" =~ ^git@github.com:(.+)$ ]]; then
 elif [[ "$UPSTREAM_WEB" =~ ^ssh://git@github.com/(.+)$ ]]; then
   UPSTREAM_WEB="https://github.com/${BASH_REMATCH[1]}"
 fi
-SCREENSHOT_URL="${FLATHUB_SCREENSHOT_URL:-https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/main.png}"
+SCREENSHOT_URL_1="${FLATHUB_SCREENSHOT_URL:-https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/connection.png}"
+SCREENSHOT_URL_2="${FLATHUB_SCREENSHOT_URL_2:-https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/session.png}"
+# Back-compat for older docs that expect a single SCREENSHOT_URL
+SCREENSHOT_URL="${SCREENSHOT_URL_1}"
 FLATHUB_VIDEO_URL="${FLATHUB_VIDEO_URL:-}"
 
 write_flathub_pr_body() {
@@ -543,7 +546,9 @@ write_flathub_pr_body() {
 
 Upstream: ${UPSTREAM_WEB}
 Tag: ${GIT_TAG} (${GIT_COMMIT})
-Screenshot: ${SCREENSHOT_URL}
+Screenshots:
+- ${SCREENSHOT_URL_1}
+- ${SCREENSHOT_URL_2}
 App ID: \`${APP_ID}\`
 
 <!-- ⚠️⚠️  Please DO NOT change anything below this line ⚠️⚠️  -->
@@ -602,7 +607,9 @@ cat > "${PKG_DIR}/README-SUBMIT.md" <<EOF
 - Commit: ${GIT_COMMIT}
 - Upstream: ${UPSTREAM_WEB}
 - App ID: \`${APP_ID}\`
-- Screenshot: ${SCREENSHOT_URL}
+- Screenshots:
+  - ${SCREENSHOT_URL_1}
+  - ${SCREENSHOT_URL_2}
 
 ## ⚠️ PR base branch
 
