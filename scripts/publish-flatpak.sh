@@ -272,7 +272,23 @@ prepare_flathub_package_tree() {
 
   git_tag="${GIT_TAG:-}"
   if [[ -z "$git_tag" ]]; then
-    git_tag="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+    # Same bump logic as publish-flathub-podman.sh
+    git -C "$ROOT" fetch origin --tags --force --prune 2>/dev/null || true
+    local latest suggest
+    latest="$(git -C "$ROOT" tag -l --sort=-v:refname 2>/dev/null | head -1 || true)"
+    if [[ -n "$latest" && "$latest" =~ ^(.*[^0-9])([0-9]+)$ ]]; then
+      suggest="$(printf "%s%d" "${BASH_REMATCH[1]}" "$((10#${BASH_REMATCH[2]} + 1))")"
+    elif [[ -n "$latest" ]]; then
+      suggest="${latest}.1"
+    else
+      suggest="v1.0.0"
+    fi
+    if [[ -n "$latest" ]]; then
+      echo "==> Latest tag: ${latest}  →  using next: ${suggest}"
+    else
+      echo "==> No tags yet  →  using: ${suggest}"
+    fi
+    git_tag="$suggest"
   fi
   if [[ -z "$git_tag" ]]; then
     echo "No git tag found. Set GIT_TAG=vX.Y.Z (created + pushed automatically if missing)." >&2

@@ -267,7 +267,59 @@ fi
 
 # Flatpak manifest source should stay HTTPS (Flathub builders pull over https).
 prompt GIT_URL "Project URL for Flatpak manifest (HTTPS preferred)" "$(default_git_url)"
-prompt GIT_TAG "Release git tag (created + pushed automatically if missing)" "v0.1.0"
+
+# Latest tag → suggest next by bumping the last numeric component (v1.0.0 → v1.0.1).
+latest_git_tag() {
+  # Version-sort prefers semver-ish names; fall back to creatordate if empty.
+  local t
+  t="$(git -C "$ROOT" tag -l --sort=-v:refname 2>/dev/null | head -1 || true)"
+  if [[ -z "$t" ]]; then
+    t="$(git -C "$ROOT" tag -l --sort=-creatordate 2>/dev/null | head -1 || true)"
+  fi
+  printf '%s' "$t"
+}
+
+suggest_next_tag() {
+  local latest="$1"
+  if [[ -z "$latest" ]]; then
+    printf '%s' "v1.0.0"
+    return
+  fi
+  # Bump trailing integer: v1.0.0 → v1.0.1, release-2 → release-3, 9 → 10
+  if [[ "$latest" =~ ^(.*[^0-9])([0-9]+)$ ]]; then
+    local prefix="${BASH_REMATCH[1]}"
+    local num="${BASH_REMATCH[2]}"
+    # Preserve zero-padding width when present (01 → 02).
+    local width=${#num}
+    local next=$((10#$num + 1))
+    printf "%s%0*d" "$prefix" "$width" "$next"
+  elif [[ "$latest" =~ ^([0-9]+)$ ]]; then
+    printf '%s' "$((10#$latest + 1))"
+  else
+    # No trailing digits — append .1
+    printf '%s.1' "$latest"
+  fi
+}
+
+info "Fetching tags from origin (for latest release)…"
+git -C "$ROOT" fetch origin --tags --force --prune 2>/dev/null \
+  || info "Could not fetch origin tags (using local tags only)"
+
+LATEST_TAG="$(latest_git_tag)"
+SUGGEST_TAG="$(suggest_next_tag "${LATEST_TAG}")"
+if [[ -n "${LATEST_TAG}" ]]; then
+  info "Latest tag: ${LATEST_TAG}  →  suggest next: ${SUGGEST_TAG}"
+else
+  info "No existing tags  →  suggest: ${SUGGEST_TAG}"
+fi
+
+# Env GIT_TAG wins; otherwise prompt with suggested bump.
+if [[ -z "${GIT_TAG}" ]]; then
+  prompt GIT_TAG "Release git tag (created + pushed automatically if missing)" "${SUGGEST_TAG}"
+else
+  info "Using GIT_TAG from environment: ${GIT_TAG}"
+fi
+
 prompt WORK_DIR "Output directory for Flathub package tree" "${ROOT}/flathub-out"
 prompt MODE "Submit mode: first (new app PR) or update (app repo PR)" "first"
 
