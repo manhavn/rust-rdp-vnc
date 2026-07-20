@@ -32,9 +32,9 @@
     </screenshot>
   </screenshots>
   <releases>
-    <release version="0.1.0" date="2026-07-20">
+    <release version="1.0.0" date="2026-07-20">
       <description>
-        <p>Initial Flatpak packaging of the Linux desktop client.</p>
+        <p>Initial Flathub packaging of the Linux desktop client (RDP + VNC).</p>
       </description>
     </release>
   </releases>

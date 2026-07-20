@@ -26,6 +26,8 @@
 #   SKIP_BUILD=1             Skip podman flatpak-builder smoke test
 #   OPEN_PR=1|0              Open GitHub PR automatically (default: ask)
 #   MODE=first|update        first = flathub/flathub new-pr; update = app repo
+#   FLATHUB_VIDEO_URL        Public demo video URL for the submission PR body
+#                            (GitHub user-attachments or raw .webm URL)
 #
 set -euo pipefail
 
@@ -441,12 +443,78 @@ cp -a "${ROOT}/flatpak/generated-sources.json" "${PKG_DIR}/"
 cp -a "${ROOT}/desktop/assets/icon.png" "${PKG_DIR}/${APP_ID}.png"
 printf '%s\n' '{ "only-arches": ["x86_64"] }' > "${PKG_DIR}/flathub.json"
 
+# Official Flathub first-submission PR description (base MUST be new-pr).
+# Optional: FLATHUB_VIDEO_URL=https://github.com/user-attachments/assets/...
+UPSTREAM_WEB="${GIT_URL%.git}"
+UPSTREAM_WEB="${UPSTREAM_WEB%/}"
+if [[ "$UPSTREAM_WEB" =~ ^git@github.com:(.+)$ ]]; then
+  UPSTREAM_WEB="https://github.com/${BASH_REMATCH[1]}"
+elif [[ "$UPSTREAM_WEB" =~ ^ssh://git@github.com/(.+)$ ]]; then
+  UPSTREAM_WEB="https://github.com/${BASH_REMATCH[1]}"
+fi
+SCREENSHOT_URL="${FLATHUB_SCREENSHOT_URL:-https://raw.githubusercontent.com/manhavn/rust-rdp-vnc/main/desktop/assets/screenshots/main.png}"
+FLATHUB_VIDEO_URL="${FLATHUB_VIDEO_URL:-}"
+
+write_flathub_pr_body() {
+  local out="$1"
+  local video_line
+  if [[ -n "${FLATHUB_VIDEO_URL}" ]]; then
+    video_line="${FLATHUB_VIDEO_URL}"
+  else
+    video_line="**(attach a short demo video of the Flatpak running on Linux — drag-drop into the PR description)**"
+  fi
+  cat > "${out}" <<EOF
+<!-- ⚠️⚠️  Submission pull request MUST be made against the \`new-pr\` **base branch** ⚠️⚠️  -->
+
+### Please confirm your submission meets all the criteria
+
+- [x] Please describe the application briefly. **Rust RDP VNC is a Linux remote desktop client (RDP via IronRDP + VNC) with a native desktop UI.**
+- [x] Please attach a video showcasing the application on Linux using the Flatpak. ${video_line}
+- [x] The Flatpak ID follows all the rules listed in the Application ID requirements.
+- [x] I have read and followed all the Submission requirements and the Submission guide and I agree to them.
+- [x] I am an author/developer/upstream contributor to the project. **Link:** ${UPSTREAM_WEB}
+
+Upstream: ${UPSTREAM_WEB}
+Tag: ${GIT_TAG} (${GIT_COMMIT})
+Screenshot: ${SCREENSHOT_URL}
+App ID: \`${APP_ID}\`
+
+<!-- ⚠️⚠️  Please DO NOT change anything below this line ⚠️⚠️  -->
+
+[appid]: https://docs.flathub.org/docs/for-app-authors/requirements#application-id
+[reqs]: https://docs.flathub.org/docs/for-app-authors/requirements
+[reqs2]: https://docs.flathub.org/docs/for-app-authors/submission
+EOF
+}
+
+write_flathub_pr_body "${PKG_DIR}/PR-BODY.md"
+
 cat > "${PKG_DIR}/README-SUBMIT.md" <<EOF
 # Flathub package for ${APP_ID}
 
 - Tag: ${GIT_TAG}
 - Commit: ${GIT_COMMIT}
-- Upstream: ${GIT_URL}
+- Upstream: ${UPSTREAM_WEB}
+- App ID: \`${APP_ID}\`
+- Screenshot: ${SCREENSHOT_URL}
+
+## ⚠️ PR base branch
+
+Submission PR **MUST** target **\`flathub/flathub\` base = \`new-pr\`** (never \`master\`).
+
+## PR description
+
+Copy **[\`PR-BODY.md\`](./PR-BODY.md)** into the GitHub PR body (or use
+\`OPEN_PR=1\` which passes it to \`gh pr create\`).
+
+Set a video URL before packaging if you already uploaded one:
+
+\`\`\`bash
+export FLATHUB_VIDEO_URL='https://github.com/user-attachments/assets/…'
+./scripts/publish-flathub-podman.sh
+\`\`\`
+
+Or attach \`desktop/assets/screenshots/demo.webm\` by drag-and-drop on the PR.
 
 ## First submission (required order)
 
@@ -466,7 +534,7 @@ git checkout -b add-${APP_ID}
 
 # 3) Copy packaging files to repo ROOT (not a subfolder)
 cp -a ${PKG_DIR}/. .
-rm -f README-SUBMIT.md
+rm -f README-SUBMIT.md PR-BODY.md
 
 # 4) Commit
 git add ${APP_ID}.yml ${APP_ID}.desktop ${APP_ID}.metainfo.xml \\
@@ -478,7 +546,9 @@ git commit -m "Add ${APP_ID} (${GIT_TAG})"
 #    (uncheck "Copy the master branch only")
 git remote add fork git@github.com:YOU/flathub.git
 git push -u fork HEAD
-gh pr create --repo flathub/flathub --base new-pr --title "Add ${APP_ID}"
+gh pr create --repo flathub/flathub --base new-pr \\
+  --title "Add ${APP_ID}" \\
+  --body-file ${PKG_DIR}/PR-BODY.md
 # (gh: once  →  gh auth login -h github.com -p ssh)
 \`\`\`
 
@@ -489,20 +559,23 @@ git clone --branch=new-pr --single-branch \\
   https://github.com/flathub/flathub.git
 cd flathub
 git checkout -b add-${APP_ID}
-cp -a ${PKG_DIR}/. . && rm -f README-SUBMIT.md
+cp -a ${PKG_DIR}/. . && rm -f README-SUBMIT.md PR-BODY.md
 git add ${APP_ID}.yml ${APP_ID}.desktop ${APP_ID}.metainfo.xml \\
   ${APP_ID}.png generated-sources.json flathub.json
 git commit -m "Add ${APP_ID} (${GIT_TAG})"
 git remote add fork https://github.com/YOU/flathub.git
-git push -u fork HEAD   # uses credential helper / PAT
-gh pr create --repo flathub/flathub --base new-pr --title "Add ${APP_ID}"
+git push -u fork HEAD
+gh pr create --repo flathub/flathub --base new-pr \\
+  --title "Add ${APP_ID}" \\
+  --body-file ${PKG_DIR}/PR-BODY.md
 \`\`\`
 
 Or one-shot with this repo's script:
 
 \`\`\`bash
 # SSH key only (no username/token prompts when key + gh work):
-GIT_AUTH=ssh OPEN_PR=1 ./scripts/publish-flathub-podman.sh
+FLATHUB_VIDEO_URL='https://github.com/user-attachments/assets/…' \\
+  GIT_AUTH=ssh OPEN_PR=1 ./scripts/publish-flathub-podman.sh
 
 # HTTPS:
 GIT_AUTH=https GH_USER=you GH_TOKEN=ghp_… OPEN_PR=1 ./scripts/publish-flathub-podman.sh
@@ -578,7 +651,8 @@ if [[ "${OPEN_PR}" == "1" ]]; then
       # Drop any nested layout leftovers if re-running on a dirty tree
       rm -rf "${APP_ID}"
       cp -a "${PKG_DIR}/." .
-      rm -f README-SUBMIT.md
+      # Helper docs must not land in the Flathub app tree
+      rm -f README-SUBMIT.md PR-BODY.md
       git config user.email "${GH_USER}@users.noreply.github.com"
       git config user.name "${GH_USER}"
       git add "${APP_ID}.yml" "${APP_ID}.desktop" "${APP_ID}.metainfo.xml" \
@@ -588,14 +662,14 @@ if [[ "${OPEN_PR}" == "1" ]]; then
       git remote remove fork 2>/dev/null || true
       git remote add fork "${FORK_PUSH}"
       git push -u fork "HEAD:refs/heads/${BRANCH}"
+      # Official checklist body (base new-pr). Video URL via FLATHUB_VIDEO_URL.
+      write_flathub_pr_body "${TMP_GH}/PR-BODY.md"
       gh pr create \
         --repo flathub/flathub \
         --base new-pr \
         --head "${GH_USER}:${BRANCH}" \
         --title "Add ${APP_ID}" \
-        --body "Add **${APP_ID}** (Rust RDP VNC) from ${GIT_URL} tag \`${GIT_TAG}\` (\`${GIT_COMMIT}\`).
-
-Please review metainfo, permissions, and build."
+        --body-file "${TMP_GH}/PR-BODY.md"
     )
     ok "PR opened (check GitHub) — base branch must be new-pr"
   else
