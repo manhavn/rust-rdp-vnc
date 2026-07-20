@@ -492,6 +492,10 @@ fi
 # ── assemble Flathub package (TOPLEVEL only — bot: "Files not in toplevel") ─
 
 PKG_DIR="${WORK_DIR%/}"
+# Never wipe/write packaging helpers into the git repo root by accident.
+if [[ -z "${PKG_DIR}" || "${PKG_DIR}" == "${ROOT}" || "${PKG_DIR}" == "." || "${PKG_DIR}" == "./" ]]; then
+  die "WORK_DIR must not be the repo root (got: '${WORK_DIR:-}'). Use e.g. ${ROOT}/flathub-out"
+fi
 info "Writing Flathub package (toplevel layout) → ${PKG_DIR}"
 rm -rf "${PKG_DIR}"
 mkdir -p "${PKG_DIR}"
@@ -647,7 +651,7 @@ git checkout -b add-${APP_ID}
 
 # 3) Copy packaging files to repo ROOT (not a subfolder)
 cp -a ${PKG_DIR}/. .
-rm -f README-SUBMIT.md PR-BODY.md
+rm -f README-SUBMIT.md PR-BODY.md PR-TITLE.txt
 
 # 4) Commit
 git add ${APP_ID}.yml ${APP_ID}.desktop ${APP_ID}.metainfo.xml \\
@@ -672,7 +676,7 @@ git clone --branch=new-pr --single-branch \\
   https://github.com/flathub/flathub.git
 cd flathub
 git checkout -b add-${APP_ID}
-cp -a ${PKG_DIR}/. . && rm -f README-SUBMIT.md PR-BODY.md
+cp -a ${PKG_DIR}/. . && rm -f README-SUBMIT.md PR-BODY.md PR-TITLE.txt
 git add ${APP_ID}.yml ${APP_ID}.desktop ${APP_ID}.metainfo.xml \\
   ${APP_ID}.png generated-sources.json flathub.json
 git commit -m "Add ${APP_ID} (${GIT_TAG})"
@@ -768,7 +772,7 @@ if [[ "${OPEN_PR}" == "1" ]]; then
       rm -rf "${APP_ID}"
       cp -a "${PKG_DIR}/." .
       # Helper docs must not land in the Flathub app tree
-      rm -f README-SUBMIT.md PR-BODY.md
+      rm -f README-SUBMIT.md PR-BODY.md PR-TITLE.txt
       git config user.email "${GH_USER}@users.noreply.github.com"
       git config user.name "${GH_USER}"
       git add "${APP_ID}.yml" "${APP_ID}.desktop" "${APP_ID}.metainfo.xml" \
