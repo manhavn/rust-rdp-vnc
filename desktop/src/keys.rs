@@ -2,6 +2,90 @@
 
 use egui::Key;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeyTransition {
+    pub key: Key,
+    pub pressed: bool,
+}
+
+/// Restores keyboard transitions that egui-winit replaces with clipboard events.
+///
+/// On Ctrl+C/X/V, egui-winit emits `Copy`/`Cut`/`Paste` instead of the key-down
+/// event, but still emits the normal key-up event. `Paste` is not emitted at all
+/// when the local clipboard is empty, so an unmatched Ctrl+V key-up also needs a
+/// synthetic key-down before it is forwarded to the remote session.
+#[derive(Default)]
+pub struct RemoteKeyboardState {
+    clipboard_keys_down: [bool; 3],
+}
+
+impl RemoteKeyboardState {
+    pub fn transitions(&mut self, event: &egui::Event) -> Vec<KeyTransition> {
+        match event {
+            egui::Event::Copy => self.clipboard_key_down(Key::C),
+            egui::Event::Cut => self.clipboard_key_down(Key::X),
+            egui::Event::Paste(_) => self.clipboard_key_down(Key::V),
+            egui::Event::Key {
+                key,
+                pressed,
+                repeat,
+                modifiers,
+                ..
+            } => {
+                if *repeat {
+                    return Vec::new();
+                }
+
+                let transition = KeyTransition {
+                    key: *key,
+                    pressed: *pressed,
+                };
+                let Some(index) = clipboard_key_index(*key) else {
+                    return vec![transition];
+                };
+
+                if *pressed {
+                    self.clipboard_keys_down[index] = true;
+                    return vec![transition];
+                }
+
+                let saw_key_down = std::mem::take(&mut self.clipboard_keys_down[index]);
+                if modifiers.ctrl && !saw_key_down {
+                    // egui-winit suppresses Ctrl+V completely when the local clipboard is empty.
+                    vec![
+                        KeyTransition {
+                            key: *key,
+                            pressed: true,
+                        },
+                        transition,
+                    ]
+                } else {
+                    vec![transition]
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    fn clipboard_key_down(&mut self, key: Key) -> Vec<KeyTransition> {
+        let index = clipboard_key_index(key).expect("clipboard shortcut key");
+        if std::mem::replace(&mut self.clipboard_keys_down[index], true) {
+            Vec::new()
+        } else {
+            vec![KeyTransition { key, pressed: true }]
+        }
+    }
+}
+
+fn clipboard_key_index(key: Key) -> Option<usize> {
+    match key {
+        Key::C => Some(0),
+        Key::X => Some(1),
+        Key::V => Some(2),
+        _ => None,
+    }
+}
+
 /// Returns (scancode, is_extended_hint).
 pub fn egui_key_to_scancode(key: Key) -> Option<(i32, bool)> {
     Some(match key {
@@ -95,4 +179,99 @@ pub fn is_extended_scancode(scancode: i32) -> bool {
         scancode,
         0x4B | 0x48 | 0x4D | 0x50 | 0x47 | 0x4F | 0x49 | 0x51 | 0x52 | 0x53
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::Modifiers;
+
+    fn key_event(key: Key, pressed: bool, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    #[test]
+    fn restores_copy_key_down_and_uses_native_key_up() {
+        let mut state = RemoteKeyboardState::default();
+
+        assert_eq!(
+            state.transitions(&egui::Event::Copy),
+            vec![KeyTransition {
+                key: Key::C,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            state.transitions(&key_event(Key::C, false, Modifiers::CTRL)),
+            vec![KeyTransition {
+                key: Key::C,
+                pressed: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn restores_paste_key_down_and_uses_native_key_up() {
+        let mut state = RemoteKeyboardState::default();
+
+        assert_eq!(
+            state.transitions(&egui::Event::Paste("clipboard text".into())),
+            vec![KeyTransition {
+                key: Key::V,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            state.transitions(&key_event(Key::V, false, Modifiers::CTRL)),
+            vec![KeyTransition {
+                key: Key::V,
+                pressed: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn reconstructs_paste_when_empty_local_clipboard_suppresses_key_down() {
+        let mut state = RemoteKeyboardState::default();
+
+        assert_eq!(
+            state.transitions(&key_event(Key::V, false, Modifiers::CTRL)),
+            vec![
+                KeyTransition {
+                    key: Key::V,
+                    pressed: true,
+                },
+                KeyTransition {
+                    key: Key::V,
+                    pressed: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn restores_cut_and_leaves_normal_keys_unchanged() {
+        let mut state = RemoteKeyboardState::default();
+
+        assert_eq!(
+            state.transitions(&egui::Event::Cut),
+            vec![KeyTransition {
+                key: Key::X,
+                pressed: true,
+            }]
+        );
+        assert_eq!(
+            state.transitions(&key_event(Key::A, true, Modifiers::CTRL)),
+            vec![KeyTransition {
+                key: Key::A,
+                pressed: true,
+            }]
+        );
+    }
 }

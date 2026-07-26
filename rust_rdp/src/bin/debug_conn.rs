@@ -19,9 +19,17 @@ impl GraphicsPipelineHandler for DummyGfxHandler {
 
 struct SimpleLogger;
 impl log::Log for SimpleLogger {
-    fn enabled(&self, _metadata: &log::Metadata) -> bool { true }
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+            || (metadata.level() <= log::Level::Debug
+                && (metadata.target().starts_with("ironrdp_connector::connection")
+                    || metadata.target().starts_with("ironrdp_connector::connection_activation")
+                    || metadata.target().starts_with("ironrdp_async::framed")))
+    }
     fn log(&self, record: &log::Record) {
-        println!("[{}] [{}]: {}", record.level(), record.target(), record.args());
+        if self.enabled(record.metadata()) {
+            println!("[{}] [{}]: {}", record.level(), record.target(), record.args());
+        }
     }
     fn flush(&self) {}
 }
@@ -152,17 +160,63 @@ fn extract_raw_public_key(spki_der: &[u8]) -> Option<Vec<u8>> {
 #[tokio::main]
 async fn main() {
     let _ = log::set_logger(&LOGGER);
-    log::set_max_level(log::LevelFilter::Trace);
+    // CredSSP trace output may include serialized credential payloads.
+    log::set_max_level(log::LevelFilter::Debug);
 
-    let host_str = "".to_string();
-    let port = 3389;
-    let user_str = "".to_string();
-    let pass_str = "".to_string();
-    let domain_str = "".to_string();
-    let width = 1280;
-    let height = 720;
+    let Some(path) = std::env::args_os().nth(1) else {
+        eprintln!("Usage: debug_conn <connection.rdp>");
+        std::process::exit(2);
+    };
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        eprintln!("Could not read {}: {e}", std::path::Path::new(&path).display());
+        std::process::exit(2);
+    });
+    let mut host_str = String::new();
+    let mut port = 3389;
+    let mut user_str = String::new();
+    let mut pass_str = String::new();
+    let mut domain_str = String::new();
+    let mut width = 1280;
+    let mut height = 720;
+    for raw in text.lines() {
+        let Some((key, rest)) = raw.trim().split_once(':') else {
+            continue;
+        };
+        let value = rest
+            .split_once(':')
+            .map(|(_, value)| value)
+            .unwrap_or(rest)
+            .trim();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "full address" => {
+                if let Some((host, parsed_port)) = value.rsplit_once(':') {
+                    if let Ok(parsed_port) = parsed_port.parse() {
+                        host_str = host.to_string();
+                        port = parsed_port;
+                    } else {
+                        host_str = value.to_string();
+                    }
+                } else {
+                    host_str = value.to_string();
+                }
+            }
+            "username" => user_str = value.to_string(),
+            "password" => pass_str = value.to_string(),
+            "domain" => domain_str = value.to_string(),
+            "desktopwidth" => width = value.parse().unwrap_or(width),
+            "desktopheight" => height = value.parse().unwrap_or(height),
+            _ => {}
+        }
+    }
+    if host_str.is_empty() {
+        eprintln!("Connection file has no full address");
+        std::process::exit(2);
+    }
 
-    println!("Starting debug connection to {}:{}...", host_str, port);
+    println!(
+        "Starting debug connection to {}:{} as {} (domain: {})...",
+        host_str, port, user_str, domain_str
+    );
 
     struct AttemptConfig {
         enable_credssp: bool,
@@ -222,7 +276,7 @@ async fn main() {
                     credentials,
                     domain: attempt.domain.clone(),
                     client_build: 2600,
-                    client_name: "AndroidRDP".to_string(),
+                    client_name: "RustRDPVNC".to_string(),
                     keyboard_type: ironrdp_pdu::gcc::KeyboardType::IbmEnhanced,
                     keyboard_subtype: 0,
                     keyboard_functional_keys_count: 12,
@@ -237,7 +291,7 @@ async fn main() {
                     client_dir: String::new(),
                     alternate_shell: String::new(),
                     work_dir: String::new(),
-                    platform: ironrdp_pdu::rdp::capability_sets::MajorPlatformType::ANDROID,
+                    platform: ironrdp_pdu::rdp::capability_sets::MajorPlatformType::UNIX,
                     hardware_id: None,
                     request_data: None,
                     autologon: true,

@@ -4,3 +4,6 @@ members = [
     "rust_rdp",
     "desktop",
 ]
+
+[patch."https://github.com/Devolutions/IronRDP.git"]
+ironrdp-connector = { path = "vendor/ironrdp-connector" }

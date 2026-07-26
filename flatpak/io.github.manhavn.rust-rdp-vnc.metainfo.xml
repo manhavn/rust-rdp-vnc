@@ -36,6 +36,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="1.0.1" date="2026-07-26">
+      <description>
+        <p>Fix GNOME Remote Desktop connection negotiation and improve sidebar scrolling.</p>
+      </description>
+    </release>
     <release version="1.0.0" date="2026-07-20">
       <description>
         <p>Initial Flathub packaging of the Linux desktop client (RDP + VNC).</p>

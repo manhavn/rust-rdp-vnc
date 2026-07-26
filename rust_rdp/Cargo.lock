@@ -2081,7 +2081,7 @@ dependencies = [
 
 [[package]]
 name = "rust_rdp"
-version = "0.1.0"
+version = "1.0.1"
 dependencies = [
  "android_logger",
  "anyhow",

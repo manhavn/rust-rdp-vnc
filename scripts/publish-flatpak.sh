@@ -272,7 +272,23 @@ prepare_flathub_package_tree() {
 
   git_tag="${GIT_TAG:-}"
   if [[ -z "$git_tag" ]]; then
-    git_tag="$(git -C "$ROOT" describe --tags --abbrev=0 2>/dev/null || true)"
+    # Same bump logic as publish-flathub-podman.sh
+    git -C "$ROOT" fetch origin --tags --force --prune 2>/dev/null || true
+    local latest suggest
+    latest="$(git -C "$ROOT" tag -l --sort=-v:refname 2>/dev/null | head -1 || true)"
+    if [[ -n "$latest" && "$latest" =~ ^(.*[^0-9])([0-9]+)$ ]]; then
+      suggest="$(printf "%s%d" "${BASH_REMATCH[1]}" "$((10#${BASH_REMATCH[2]} + 1))")"
+    elif [[ -n "$latest" ]]; then
+      suggest="${latest}.1"
+    else
+      suggest="v1.0.0"
+    fi
+    if [[ -n "$latest" ]]; then
+      echo "==> Latest tag: ${latest}  →  using next: ${suggest}" >&2
+    else
+      echo "==> No tags yet  →  using: ${suggest}" >&2
+    fi
+    git_tag="$suggest"
   fi
   if [[ -z "$git_tag" ]]; then
     echo "No git tag found. Set GIT_TAG=vX.Y.Z (created + pushed automatically if missing)." >&2
@@ -280,24 +296,24 @@ prepare_flathub_package_tree() {
   fi
   # Auto-create local tag + push to origin when the tag is missing.
   if ! git -C "$ROOT" rev-parse -q --verify "refs/tags/${git_tag}" >/dev/null; then
-    echo "==> Tag ${git_tag} not found locally — creating on HEAD…"
+    echo "==> Tag ${git_tag} not found locally — creating on HEAD…" >&2
     if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null || true)" ]]; then
-      echo "    Note: uncommitted changes are not included in the tag (points at last commit)."
+      echo "    Note: uncommitted changes are not included in the tag (points at last commit)." >&2
     fi
     git -C "$ROOT" tag "${git_tag}" \
       || { echo "Failed to create tag ${git_tag}" >&2; exit 1; }
-    echo "    ✓ created local tag ${git_tag}"
+    echo "    ✓ created local tag ${git_tag}" >&2
   fi
   if ! git -C "$ROOT" ls-remote --exit-code --tags origin "refs/tags/${git_tag}" >/dev/null 2>&1; then
-    echo "==> Pushing tag ${git_tag} to origin…"
+    echo "==> Pushing tag ${git_tag} to origin…" >&2
     git -C "$ROOT" push origin "refs/tags/${git_tag}" \
       || { echo "Failed to push tag ${git_tag} to origin" >&2; exit 1; }
-    echo "    ✓ pushed ${git_tag}"
+    echo "    ✓ pushed ${git_tag}" >&2
   fi
   git_commit="$(git -C "$ROOT" rev-list -n 1 "${git_tag}")"
 
   if [[ ! -f "${ROOT}/flatpak/generated-sources.json" ]]; then
-    echo "==> generated-sources.json missing — generating (slow)…"
+    echo "==> generated-sources.json missing — generating (slow)…" >&2
     generate_cargo_sources
   fi
   [[ -f "$TEMPLATE" ]] || {
@@ -305,8 +321,8 @@ prepare_flathub_package_tree() {
     exit 1
   }
 
-  echo "==> Flathub package tree → ${out}"
-  echo "    tag=${git_tag} commit=${git_commit}"
+  echo "==> Flathub package tree → ${out}" >&2
+  echo "    tag=${git_tag} commit=${git_commit}" >&2
   sed \
     -e "s|__GIT_URL__|${git_url}|g" \
     -e "s|__GIT_TAG__|${git_tag}|g" \

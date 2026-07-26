@@ -88,7 +88,7 @@ cd /path/to/rust-rdp-vnc
 ```bash
 cd /path/to/rust-rdp-vnc
 snapcraft pack
-# → rust-rdp-vnc_0.1.0_amd64.snap (version from snapcraft.yaml)
+# → rust-rdp-vnc_1.0.1_amd64.snap (version from snapcraft.yaml)
 ```
 
 First build is slow: downloads SDK, compiles Rust, IronRDP, openh264, etc.
@@ -128,13 +128,13 @@ sudo snap remove rust-rdp-vnc
 ### Upload manually
 
 ```bash
-snapcraft upload --release=edge ./rust-rdp-vnc_0.1.0_amd64.snap
+snapcraft upload --release=edge ./rust-rdp-vnc_1.0.1_amd64.snap
 ```
 
 Or upload without releasing, then promote:
 
 ```bash
-snapcraft upload ./rust-rdp-vnc_0.1.0_amd64.snap
+snapcraft upload ./rust-rdp-vnc_1.0.1_amd64.snap
 snapcraft status rust-rdp-vnc
 snapcraft release rust-rdp-vnc <revision> edge
 snapcraft release rust-rdp-vnc <revision> stable

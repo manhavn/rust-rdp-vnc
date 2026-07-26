@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keys::{egui_key_to_scancode, is_extended_scancode};
+use keys::{egui_key_to_scancode, is_extended_scancode, RemoteKeyboardState};
 
 // ── Desktop chrome palette (neutral, not mobile-neon) ───────────────────────
 mod theme {
@@ -215,12 +215,14 @@ impl Prefs {
             return p;
         };
         for line in text.lines() {
+            let line = line.trim_matches(|c| c == '\r' || c == '\n');
             if let Some((k, v)) = line.split_once('=') {
-                match k {
+                let v = v.trim();
+                match k.trim() {
                     "host" => p.host = v.to_string(),
                     "port" => p.port = v.to_string(),
                     "username" => p.username = v.to_string(),
-                    "password" => p.password = v.to_string(),
+                    "password" => p.password = v.trim_matches(|c| c == '\r' || c == '\n').to_string(),
                     "domain" => p.domain = v.to_string(),
                     "mode" => p.mode = v.to_string(),
                     "width" => p.width = v.to_string(),
@@ -496,6 +498,9 @@ struct ConnectionTab {
     mod_shift: bool,
     mod_ctrl: bool,
     mod_alt: bool,
+    /// Fractional RDP scroll distance carried between input frames.
+    rdp_scroll_remainder: f32,
+    keyboard_state: RemoteKeyboardState,
 }
 
 impl ConnectionTab {
@@ -513,6 +518,8 @@ impl ConnectionTab {
             mod_shift: false,
             mod_ctrl: false,
             mod_alt: false,
+            rdp_scroll_remainder: 0.0,
+            keyboard_state: RemoteKeyboardState::default(),
         }
     }
 
@@ -581,6 +588,47 @@ struct DesktopApp {
 /// Host key (VirtualBox/VMware/Remmina style): leave remote keyboard / exit view fullscreen.
 /// Combo: Ctrl + Alt + Enter
 const HOST_KEY_HINT: &str = "Ctrl+Alt+Enter";
+
+/// egui normalizes one native line-wheel tick to 40 points; using 32 here
+/// makes RDP scrolling 25% faster while retaining smooth-delta accumulation.
+const RDP_SCROLL_POINTS_PER_NOTCH: f32 = 32.0;
+/// VNC servers expose wheel input as button clicks; 3 points per notch keeps
+/// macOS responsive without changing the Android VNC gesture path.
+const VNC_SCROLL_POINTS_PER_NOTCH: f32 = 3.0;
+const MAX_WHEEL_NOTCHES_PER_FRAME: i32 = 16;
+
+fn remote_wheel_units(scroll_y: f32, is_vnc: bool, rdp_remainder: &mut f32) -> Option<i32> {
+    if scroll_y == 0.0 {
+        return None;
+    }
+
+    if is_vnc {
+        *rdp_remainder = 0.0;
+        // egui and VNC button 4/5 use the same positive-up direction.
+        let direction = if scroll_y > 0.0 { 1 } else { -1 };
+        let notches = (scroll_y.abs() / VNC_SCROLL_POINTS_PER_NOTCH)
+            .ceil()
+            .clamp(1.0, MAX_WHEEL_NOTCHES_PER_FRAME as f32) as i32;
+        return Some(direction * 120 * notches);
+    }
+
+    // RDP follows egui's wheel direction. Accumulate high-resolution point
+    // deltas so a touchpad does not turn every tiny event into a full notch.
+    if *rdp_remainder != 0.0 && rdp_remainder.signum() != scroll_y.signum() {
+        *rdp_remainder = 0.0;
+    }
+    let total = *rdp_remainder + scroll_y;
+    let available_notches = (total.abs() / RDP_SCROLL_POINTS_PER_NOTCH).floor() as i32;
+    if available_notches == 0 {
+        *rdp_remainder = total;
+        return None;
+    }
+
+    let direction = if total > 0.0 { 1 } else { -1 };
+    let notches = available_notches.min(MAX_WHEEL_NOTCHES_PER_FRAME);
+    *rdp_remainder = direction as f32 * (total.abs() % RDP_SCROLL_POINTS_PER_NOTCH);
+    Some(direction * 120 * notches)
+}
 
 impl DesktopApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
@@ -919,10 +967,10 @@ impl DesktopApp {
             (
                 tab.prefs.host.trim().to_string(),
                 port,
-                tab.prefs.username.clone(),
-                tab.prefs.password.clone(),
-                tab.prefs.domain.clone(),
-                tab.prefs.mode.clone(),
+                tab.prefs.username.trim().to_string(),
+                tab.prefs.password.trim_matches(|c| c == '\r' || c == '\n').to_string(),
+                tab.prefs.domain.trim().to_string(),
+                tab.prefs.mode.trim().to_string(),
                 width,
                 height,
                 tab.prefs.endpoint_label(),
@@ -1687,17 +1735,16 @@ impl DesktopApp {
         }
 
         ui.add_space(16.0);
-        ui.with_layout(Layout::bottom_up(Align::LEFT), |ui| {
-            ui.add_space(8.0);
-            ui.label(
-                RichText::new(
-                    "Ctrl+T            New connection\nCtrl+W            Close tab\nCtrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\nCtrl+Alt+Enter    Host key (exit view FS)\n\nWhile the remote view has focus,\nhost shortcuts are disabled.",
-                )
-                .small()
-                .monospace()
-                .color(theme::TEXT_DIM),
-            );
-        });
+        ui.separator();
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(
+                "Ctrl+T            New connection\nCtrl+W            Close tab\nCtrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\nCtrl+Alt+Enter    Host key (exit view FS)\n\nWhile the remote view has focus,\nhost shortcuts are disabled.",
+            )
+            .small()
+            .monospace()
+            .color(theme::TEXT_DIM),
+        );
     }
 
     // ── Status bar ──────────────────────────────────────────────────────────
@@ -1902,8 +1949,9 @@ impl DesktopApp {
             *self.tab().shared.state.lock(),
             ConnectionState::Connected | ConnectionState::Connecting
         );
+        let view_fullscreen = self.view_fullscreen;
         let view_focused = response.has_focus() || response.hovered();
-        if connected && (view_focused || self.view_fullscreen) {
+        if connected && (view_focused || view_fullscreen) {
             self.remote_input_active = true;
         }
 
@@ -1953,8 +2001,8 @@ impl DesktopApp {
                     tab.right_down = false;
                 }
 
-                // Wheel → always remote when over the surface
-                if response.hovered() || self.view_fullscreen {
+                // Wheel → always remote when over the surface.
+                if response.hovered() || view_fullscreen {
                     let mut scroll_y = raw_scroll.y;
                     if scroll_y == 0.0 {
                         ui.input(|i| {
@@ -1965,10 +2013,11 @@ impl DesktopApp {
                             }
                         });
                     }
-                    if scroll_y != 0.0 {
-                        let sign = if scroll_y > 0.0 { -1 } else { 1 };
-                        let notches = (scroll_y.abs() / 8.0).ceil().clamp(1.0, 16.0) as i32;
-                        send_mouse_wheel_event(x, y, sign * 120 * notches);
+                    let is_vnc = tab.prefs.mode.eq_ignore_ascii_case("VNC");
+                    if let Some(units) =
+                        remote_wheel_units(scroll_y, is_vnc, &mut tab.rdp_scroll_remainder)
+                    {
+                        send_mouse_wheel_event(x, y, units);
                     }
                 }
             }
@@ -2007,27 +2056,21 @@ impl DesktopApp {
 
         let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
         for event in events {
-            if let egui::Event::Key {
-                key,
-                pressed,
-                repeat,
-                modifiers: modifs,
-                ..
-            } = event
-            {
-                if repeat {
+            if let egui::Event::Key { key, modifiers, .. } = &event {
+                if Self::is_host_key_chord(*modifiers, *key) {
                     continue;
                 }
-                if Self::is_host_key_chord(modifs, key) {
-                    continue;
-                }
-                if let Some((scancode, extended)) = egui_key_to_scancode(key) {
+            }
+
+            let transitions = self.tab_mut().keyboard_state.transitions(&event);
+            for transition in transitions {
+                if let Some((scancode, extended)) = egui_key_to_scancode(transition.key) {
                     let ext = extended || is_extended_scancode(scancode);
-                    send_scancode_event(scancode, ext, if pressed { 1 } else { 0 });
-                } else if key == Key::Backspace {
-                    send_key_event(8, if pressed { 1 } else { 0 });
-                } else if key == Key::Enter {
-                    send_key_event(13, if pressed { 1 } else { 0 });
+                    send_scancode_event(scancode, ext, if transition.pressed { 1 } else { 0 });
+                } else if transition.key == Key::Backspace {
+                    send_key_event(8, if transition.pressed { 1 } else { 0 });
+                } else if transition.key == Key::Enter {
+                    send_key_event(13, if transition.pressed { 1 } else { 0 });
                 }
             }
         }
@@ -2412,7 +2455,7 @@ impl eframe::App for DesktopApp {
                     ui.label("Supports Microsoft RDP and VNC protocols.");
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Version 0.1.0")
+                        RichText::new("Version 1.0.1")
                             .small()
                             .color(theme::TEXT_DIM),
                     );
@@ -2450,4 +2493,41 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(|cc| Ok(Box::new(DesktopApp::new(cc)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remote_wheel_units;
+
+    #[test]
+    fn vnc_wheel_uses_correct_direction_and_faster_speed() {
+        let mut remainder = 0.0;
+        assert_eq!(remote_wheel_units(40.0, true, &mut remainder), Some(1680));
+        assert_eq!(remote_wheel_units(-40.0, true, &mut remainder), Some(-1680));
+    }
+
+    #[test]
+    fn rdp_wheel_uses_one_notch_per_native_line_and_correct_direction() {
+        let mut remainder = 0.0;
+        assert_eq!(remote_wheel_units(40.0, false, &mut remainder), Some(120));
+        assert_eq!(remote_wheel_units(-40.0, false, &mut remainder), Some(-120));
+    }
+
+    #[test]
+    fn rdp_wheel_accumulates_high_resolution_deltas() {
+        let mut remainder = 0.0;
+        assert_eq!(remote_wheel_units(15.0, false, &mut remainder), None);
+        assert_eq!(remote_wheel_units(15.0, false, &mut remainder), None);
+        assert_eq!(remote_wheel_units(15.0, false, &mut remainder), Some(120));
+        assert_eq!(remainder, 13.0);
+    }
+
+    #[test]
+    fn rdp_wheel_is_twenty_five_percent_faster_than_native_lines() {
+        let mut remainder = 0.0;
+        let units: i32 = (0..4)
+            .filter_map(|_| remote_wheel_units(40.0, false, &mut remainder))
+            .sum();
+        assert_eq!(units, 600);
+    }
 }

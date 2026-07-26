@@ -86,7 +86,7 @@ cd /path/to/rust-rdp-vnc
 ```bash
 cd /path/to/rust-rdp-vnc
 snapcraft pack
-# → rust-rdp-vnc_0.1.0_amd64.snap
+# → rust-rdp-vnc_1.0.1_amd64.snap
 ```
 
 Lần đầu lâu: tải SDK, compile Rust, IronRDP, openh264, …
@@ -124,13 +124,13 @@ sudo snap remove rust-rdp-vnc
 ### Upload thủ công
 
 ```bash
-snapcraft upload --release=edge ./rust-rdp-vnc_0.1.0_amd64.snap
+snapcraft upload --release=edge ./rust-rdp-vnc_1.0.1_amd64.snap
 ```
 
 Hoặc upload rồi promote:
 
 ```bash
-snapcraft upload ./rust-rdp-vnc_0.1.0_amd64.snap
+snapcraft upload ./rust-rdp-vnc_1.0.1_amd64.snap
 snapcraft status rust-rdp-vnc
 snapcraft release rust-rdp-vnc <revision> edge
 snapcraft release rust-rdp-vnc <revision> stable

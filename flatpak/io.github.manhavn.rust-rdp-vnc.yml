@@ -67,6 +67,14 @@ modules:
       # Local development: working tree + offline crates (generated-sources.json).
       - type: dir
         path: ..
+        skip:
+          - .codegraph
+          - .flatpak-builder
+          - .flatpak-build
+          - .flatpak-repo
+          - .flatpak-preflight
+          - .flatpak-cargo-gen
+          - target
       # Vendored crates for sandboxed / offline cargo (required for reliable builds).
       # Generate with: ./scripts/publish-flatpak.sh --generate-sources
       - generated-sources.json

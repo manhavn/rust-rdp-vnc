@@ -337,7 +337,7 @@ fn copy_gfx_bitmap_to_screen(
     screen_pixels: &mut [i32],
     screen_w: i32,
     screen_h: i32,
-    rect: &ironrdp_pdu::geometry::InclusiveRectangle,
+    rect: &ironrdp_pdu::geometry::ExclusiveRectangle,
     decoded_data: &[u8],
 ) {
     let rect_w = rect.width() as i32;
@@ -937,6 +937,12 @@ pub fn connect_session(
     conn_mode_str: String,
     callback: SharedCallback,
 ) -> u64 {
+    let host_str = host_str.trim().to_string();
+    let user_str = user_str.trim().to_string();
+    let pass_str = pass_str.trim_matches(|c| c == '\r' || c == '\n').to_string();
+    let domain_str = domain_str.trim().to_string();
+    let conn_mode_str = conn_mode_str.trim().to_string();
+
     log::info!(
         "Connecting ({}). Host: {}, Port: {}, User: {}, Domain: {}, Width: {}, Height: {}",
         conn_mode_str, host_str, port, user_str, domain_str, width, height
@@ -1127,6 +1133,21 @@ pub fn connect_session(
         let rt_guard = RUNTIME.lock().unwrap();
         if let Some(ref rt) = *rt_guard {
             rt.spawn(async move {
+                // Parse username and domain
+                let (parsed_user, parsed_domain) = if user_str.contains('\\') {
+                    let mut parts = user_str.splitn(2, '\\');
+                    let d = parts.next().unwrap_or("").to_string();
+                    let u = parts.next().unwrap_or("").to_string();
+                    (u, if !domain_str.is_empty() { domain_str.clone() } else { d })
+                } else if user_str.contains('@') {
+                    let mut parts = user_str.splitn(2, '@');
+                    let u = parts.next().unwrap_or("").to_string();
+                    let d = parts.next().unwrap_or("").to_string();
+                    (u, if !domain_str.is_empty() { domain_str.clone() } else { d })
+                } else {
+                    (user_str.clone(), domain_str.clone())
+                };
+
                 struct AttemptConfig {
                     enable_credssp: bool,
                     domain: Option<String>,
@@ -1134,10 +1155,10 @@ pub fn connect_session(
                 }
 
                 let mut attempts = Vec::new();
-                if !domain_str.is_empty() {
+                if !parsed_domain.is_empty() {
                     attempts.push(AttemptConfig {
                         enable_credssp: true,
-                        domain: Some(domain_str.clone()),
+                        domain: Some(parsed_domain.clone()),
                         desc: "CredSSP (NLA) with domain",
                     });
                 }
@@ -1147,13 +1168,19 @@ pub fn connect_session(
                     desc: "CredSSP (NLA) without domain",
                 });
                 attempts.push(AttemptConfig {
+                    enable_credssp: true,
+                    domain: Some(".".to_string()),
+                    desc: "CredSSP (NLA) with local domain '.'",
+                });
+                attempts.push(AttemptConfig {
                     enable_credssp: false,
                     domain: None,
                     desc: "TLS Security (no NLA)",
                 });
 
                 let addr = format!("{}:{}", host_str, port);
-                let mut last_error = String::new();
+                let mut attempt_errors: Vec<(String, String)> = Vec::new();
+                let mut nla_required_by_server = false;
                 let mut successful_conn = None;
 
                 for (idx, attempt) in attempts.iter().enumerate() {
@@ -1166,13 +1193,14 @@ pub fn connect_session(
                             let local_addr = match tcp_stream.local_addr() {
                                 Ok(addr) => addr,
                                 Err(e) => {
-                                    last_error = format!("Socket local_addr error: {}", e);
+                                    let err_msg = format!("Socket local_addr error: {}", e);
+                                    attempt_errors.push((attempt.desc.to_string(), err_msg));
                                     continue;
                                 }
                             };
 
                             let credentials = Credentials::UsernamePassword {
-                                username: user_str.clone(),
+                                username: parsed_user.clone(),
                                 password: pass_str.clone(),
                             };
 
@@ -1237,8 +1265,13 @@ pub fn connect_session(
                                 Ok(su) => su,
                                 Err(e) => {
                                     log::warn!("connect_begin failed for {}: {:?}", attempt.desc, e);
-                                    last_error = format!("Handshake failed: {:?}", e);
+                                    let err_debug = format!("{:?}", e);
+                                    if err_debug.contains("FailureCode(5)") || err_debug.contains("HYBRID_REQUIRED_BY_SERVER") {
+                                        nla_required_by_server = true;
+                                    }
+                                    let err_msg = format!("Handshake failed: {:?}", e);
                                     notify_state_change(callback_clone.as_ref(), 1, &format!("Attempt failed (connect_begin): {:?}", e));
+                                    attempt_errors.push((attempt.desc.to_string(), err_msg));
                                     continue;
                                 }
                             };
@@ -1260,7 +1293,8 @@ pub fn connect_session(
                             let server_name = match ServerName::try_from(host_str.clone()) {
                                 Ok(sn) => sn.to_owned(),
                                 Err(e) => {
-                                    last_error = format!("Invalid host name: {:?}", e);
+                                    let err_msg = format!("Invalid host name: {:?}", e);
+                                    attempt_errors.push((attempt.desc.to_string(), err_msg));
                                     continue;
                                 }
                             };
@@ -1270,8 +1304,9 @@ pub fn connect_session(
                                 Ok(ts) => ts,
                                 Err(e) => {
                                     log::warn!("TLS connect failed for {}: {:?}", attempt.desc, e);
-                                    last_error = format!("TLS Connection Failed: {:?}", e);
+                                    let err_msg = format!("TLS Connection Failed: {:?}", e);
                                     notify_state_change(callback_clone.as_ref(), 1, &format!("Attempt failed (TLS connect): {:?}", e));
+                                    attempt_errors.push((attempt.desc.to_string(), err_msg));
                                     continue;
                                 }
                             };
@@ -1319,16 +1354,25 @@ pub fn connect_session(
                                 }
                                 Err(e) => {
                                     log::warn!("connect_finalize failed for {}: {:?}", attempt.desc, e);
-                                    last_error = format!("Finalize failed: {:?}", e);
-                                    notify_state_change(callback_clone.as_ref(), 1, &format!("Attempt failed (connect_finalize): {:?}", e));
+                                    let raw_err = format!("{:?}", e);
+                                    let err_msg = if raw_err.contains("UserRequested") || raw_err.contains("disconnect provider ultimatum") {
+                                        format!("Session disconnected by Windows server (UserRequested: Check username/password or if a session is currently active). Details: {:?}", e)
+                                    } else if raw_err.contains("invalid state") {
+                                        format!("Authentication rejected by remote server (check username, password, domain, or RDP permissions on Windows host). Details: {:?}", e)
+                                    } else {
+                                        format!("Authentication / Finalize failed: {:?}", e)
+                                    };
+                                    notify_state_change(callback_clone.as_ref(), 1, &format!("Attempt failed (connect_finalize): {}", err_msg));
+                                    attempt_errors.push((attempt.desc.to_string(), err_msg));
                                     continue;
                                 }
                             }
                         }
                         Err(e) => {
                             log::warn!("TCP Connect failed for {}: {}", attempt.desc, e);
-                            last_error = format!("Network connection refused: {}", e);
+                            let err_msg = format!("Network connection refused: {}", e);
                             notify_state_change(callback_clone.as_ref(), 1, &format!("Attempt failed (TCP connect): {}", e));
+                            attempt_errors.push((attempt.desc.to_string(), err_msg));
                             continue;
                         }
                     }
@@ -1337,8 +1381,22 @@ pub fn connect_session(
                 let (framed, res) = match successful_conn {
                     Some(f) => f,
                     None => {
-                        log::error!("All RDP connection attempts failed. Last error: {}", last_error);
-                        notify_state_change(callback_clone.as_ref(), 3, &format!("{}", last_error));
+                        let credssp_failure = attempt_errors.iter().find(|(desc, _)| desc.contains("CredSSP"));
+                        let final_error = if nla_required_by_server {
+                            if let Some((desc, err)) = credssp_failure {
+                                format!("Server requires NLA (CredSSP). NLA authentication failed ({}): {}", desc, err)
+                            } else {
+                                format!("Server requires NLA (CredSSP), but CredSSP negotiation failed.")
+                            }
+                        } else {
+                            attempt_errors.iter()
+                                .map(|(desc, err)| format!("[{}]: {}", desc, err))
+                                .collect::<Vec<_>>()
+                                .join(" | ")
+                        };
+
+                        log::error!("All RDP connection attempts failed. Details: {}", final_error);
+                        notify_state_change(callback_clone.as_ref(), 3, &final_error);
                         return;
                     }
                 };
@@ -1475,7 +1533,7 @@ pub fn connect_session(
                                         }
                                     }
                                 } else if action == Action::X224 {
-                                    match ironrdp_connector::legacy::decode_send_data_indication(&frame) {
+                                    match ironrdp_pdu::mcs::decode_send_data_indication(&frame) {
                                         Ok(data_ctx) => {
                                             if Some(data_ctx.channel_id) == drdynvc_channel_id {
                                                 if let Some(svc) = static_channels.get_by_channel_id_mut(data_ctx.channel_id) {
@@ -1629,6 +1687,33 @@ pub fn send_mouse_event(x: i32, y: i32, action: i32) {
     });
 }
 
+fn rdp_wheel_rotation_chunks(units: i32) -> Vec<i16> {
+    let mut remaining = units.unsigned_abs();
+    let direction = if units < 0 { -1 } else { 1 };
+    let mut chunks = Vec::with_capacity(remaining.div_ceil(120).min(24) as usize);
+
+    // Keep each PDU at no more than one conventional Windows wheel detent and
+    // cap bursts so a single input frame cannot flood the input channel.
+    while remaining > 0 && chunks.len() < 24 {
+        let magnitude = remaining.min(120) as i16;
+        remaining -= magnitude as u32;
+        chunks.push(direction * magnitude);
+    }
+
+    chunks
+}
+
+fn vnc_wheel_steps(units: i32) -> u32 {
+    if units == 0 {
+        return 0;
+    }
+
+    // VNC represents wheel motion as button presses rather than a signed
+    // rotation value. Keep a finite burst cap while allowing responsive macOS
+    // scrolling from the desktop client.
+    ((units.unsigned_abs() + 59) / 60).clamp(1, 32)
+}
+
 pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
     if units == 0 {
         return;
@@ -1637,11 +1722,6 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
                 // Expand total delta into multiple 120-unit notches (Windows WHEEL_DELTA).
-                // ironrdp only packs the low 8 bits of rotation per PDU, so multi-notch
-                // is the reliable way to scroll faster.
-                let mut remaining = units.unsigned_abs().max(1);
-                let negative = units < 0;
-
                 let move_pdu = MousePdu {
                     flags: PointerFlags::MOVE,
                     number_of_wheel_rotation_units: 0,
@@ -1650,18 +1730,7 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                 };
                 let _ = input_tx.send(FastPathInputEvent::MouseEvent(move_pdu));
 
-                // Cap bursts so a single frame cannot flood the input channel.
-                let mut emitted = 0u32;
-                while remaining > 0 && emitted < 24 {
-                    let chunk = remaining.min(120) as i16;
-                    remaining -= chunk as u32;
-                    emitted += 1;
-
-                    // ironrdp encodes `n as u8` into the low byte and sets WHEEL_NEGATIVE
-                    // when n < 0. MS-RDP expects that low byte to be the *absolute*
-                    // rotation, so for scroll-down use n = abs - 256.
-                    let wheel_units = if negative { chunk - 256 } else { chunk };
-
+                for wheel_units in rdp_wheel_rotation_chunks(units) {
                     let mouse_pdu = MousePdu {
                         flags: PointerFlags::VERTICAL_WHEEL,
                         number_of_wheel_rotation_units: wheel_units,
@@ -1684,7 +1753,7 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                 let _ = input_tx.send(event_move);
 
                 // Map Windows-style units to VNC click steps (≈120 units per step).
-                let steps = ((units.unsigned_abs() + 59) / 60).clamp(1, 24);
+                let steps = vnc_wheel_steps(units);
                 for _ in 0..steps {
                     let event_wheel_press = vnc::X11Event::PointerEvent(vnc::ClientMouseEvent {
                         position_x: x as u16,
@@ -1771,4 +1840,30 @@ pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{rdp_wheel_rotation_chunks, vnc_wheel_steps};
+
+    #[test]
+    fn rdp_wheel_chunks_preserve_signed_units() {
+        assert_eq!(rdp_wheel_rotation_chunks(120), vec![120]);
+        assert_eq!(rdp_wheel_rotation_chunks(-120), vec![-120]);
+        assert_eq!(rdp_wheel_rotation_chunks(240), vec![120, 120]);
+        assert_eq!(rdp_wheel_rotation_chunks(-240), vec![-120, -120]);
+    }
+
+    #[test]
+    fn rdp_wheel_chunks_preserve_partial_detents() {
+        assert_eq!(rdp_wheel_rotation_chunks(15), vec![15]);
+        assert_eq!(rdp_wheel_rotation_chunks(-15), vec![-15]);
+    }
+
+    #[test]
+    fn vnc_wheel_allows_the_faster_desktop_burst() {
+        assert_eq!(vnc_wheel_steps(1680), 28);
+        assert_eq!(vnc_wheel_steps(-1680), 28);
+        assert_eq!(vnc_wheel_steps(i32::MAX), 32);
+    }
 }
