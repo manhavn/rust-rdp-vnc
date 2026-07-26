@@ -158,18 +158,26 @@ pub fn egui_key_to_scancode(key: Key) -> Option<(i32, bool)> {
         Key::Delete => (0x53, true),
 
         Key::Minus => (0x0C, false),
-        Key::Equals => (0x0D, false),
+        Key::Equals | Key::Plus => (0x0D, false),
         Key::OpenBracket => (0x1A, false),
         Key::CloseBracket => (0x1B, false),
-        Key::Backslash => (0x2B, false),
-        Key::Semicolon => (0x27, false),
+        Key::Backslash | Key::Pipe => (0x2B, false),
+        Key::Semicolon | Key::Colon => (0x27, false),
         Key::Quote => (0x28, false),
         Key::Backtick => (0x29, false),
         Key::Comma => (0x33, false),
         Key::Period => (0x34, false),
-        Key::Slash => (0x35, false),
+        Key::Slash | Key::Questionmark => (0x35, false),
 
-        // Modifier keys are tracked via egui::Modifiers, not Key variants in egui 0.31.
+        Key::F13 => (0x64, false),
+        Key::F14 => (0x65, false),
+        Key::F15 => (0x66, false),
+        Key::F16 => (0x67, false),
+        Key::F17 => (0x68, false),
+        Key::F18 => (0x69, false),
+        Key::F19 => (0x6A, false),
+        Key::F20 => (0x6B, false),
+
         _ => return None,
     })
 }
@@ -273,5 +281,14 @@ mod tests {
                 pressed: true,
             }]
         );
+    }
+
+    #[test]
+    fn maps_plus_and_special_keys_to_scancodes() {
+        assert_eq!(egui_key_to_scancode(Key::Plus), Some((0x0D, false)));
+        assert_eq!(egui_key_to_scancode(Key::Equals), Some((0x0D, false)));
+        assert_eq!(egui_key_to_scancode(Key::Colon), Some((0x27, false)));
+        assert_eq!(egui_key_to_scancode(Key::Pipe), Some((0x2B, false)));
+        assert_eq!(egui_key_to_scancode(Key::Questionmark), Some((0x35, false)));
     }
 }

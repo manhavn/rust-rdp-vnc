@@ -180,8 +180,14 @@ generate_cargo_sources() {
     exit 1
   fi
 
-  # tomli may be required depending on generator version
-  python3 -m pip install --user -q toml aiohttp 2>/dev/null || true
+  # tomli, tomlkit, pyyaml, and aiohttp required by flatpak-cargo-generator.py
+  python3 -m pip install --user --break-system-packages -q toml tomlkit pyyaml aiohttp 2>/dev/null \
+    || python3 -m pip install --user -q toml tomlkit pyyaml aiohttp 2>/dev/null \
+    || true
+
+  if ! python3 -c "import aiohttp, tomlkit, yaml" 2>/dev/null; then
+    echo "Warning: Some python modules (aiohttp, tomlkit, pyyaml) might be missing for flatpak-cargo-generator." >&2
+  fi
 
   python3 "$script" "${ROOT}/Cargo.lock" -o "${ROOT}/flatpak/generated-sources.json"
   echo "    Wrote flatpak/generated-sources.json"

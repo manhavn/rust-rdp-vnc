@@ -1,6 +1,6 @@
 [package]
 name = "rust_rdp"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
 
 [lib]
@@ -27,7 +27,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 picky = "=7.0.0-rc.25"
 ironrdp-core = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
 ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
-ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e", features = ["openh264-bundled"] }
+ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
 ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
 anyhow = "1.0"
 vnc-rs = "*"

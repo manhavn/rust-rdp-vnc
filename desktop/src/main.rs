@@ -498,6 +498,7 @@ struct ConnectionTab {
     mod_shift: bool,
     mod_ctrl: bool,
     mod_alt: bool,
+    mod_super: bool,
     /// Fractional RDP scroll distance carried between input frames.
     rdp_scroll_remainder: f32,
     keyboard_state: RemoteKeyboardState,
@@ -518,6 +519,7 @@ impl ConnectionTab {
             mod_shift: false,
             mod_ctrl: false,
             mod_alt: false,
+            mod_super: false,
             rdp_scroll_remainder: 0.0,
             keyboard_state: RemoteKeyboardState::default(),
         }
@@ -938,6 +940,11 @@ impl DesktopApp {
         if modifiers.alt != tab.mod_alt {
             send_scancode_event(0x38, false, if modifiers.alt { 1 } else { 0 });
             tab.mod_alt = modifiers.alt;
+        }
+        let is_super = modifiers.mac_cmd;
+        if is_super != tab.mod_super {
+            send_scancode_event(0x5B, true, if is_super { 1 } else { 0 });
+            tab.mod_super = is_super;
         }
     }
 
@@ -2027,6 +2034,9 @@ impl DesktopApp {
             return;
         }
 
+        // Keep keyboard focus on the remote view while active
+        response.request_focus();
+
         // Host key must not be injected into the remote session
         let host_key_this_frame = ui.input(|i| Self::is_host_key_pressed(i));
         if host_key_this_frame {
@@ -2043,15 +2053,14 @@ impl DesktopApp {
                 send_scancode_event(0x2A, false, 0);
                 tab.mod_shift = false;
             }
+            if tab.mod_super {
+                send_scancode_event(0x5B, true, 0);
+                tab.mod_super = false;
+            }
             return;
         }
 
         let modifiers = ui.input(|i| i.modifiers);
-        // While holding Ctrl+Alt (host-key prefix), do not forward keys to remote
-        if modifiers.ctrl && modifiers.alt && !modifiers.shift {
-            return;
-        }
-
         self.sync_modifiers(modifiers);
 
         let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
@@ -2455,7 +2464,7 @@ impl eframe::App for DesktopApp {
                     ui.label("Supports Microsoft RDP and VNC protocols.");
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Version 1.0.1")
+                        RichText::new("Version 1.0.2")
                             .small()
                             .color(theme::TEXT_DIM),
                     );

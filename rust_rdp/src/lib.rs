@@ -1253,7 +1253,7 @@ pub fn connect_session(
                                 width,
                                 height,
                             };
-                            let h264_decoder = ironrdp_egfx::decode::OpenH264Decoder::new().ok().map(|d| Box::new(d) as Box<dyn ironrdp_egfx::decode::H264Decoder>);
+                            let h264_decoder: Option<Box<dyn ironrdp_egfx::decode::H264Decoder>> = None;
                             let gfx_client = GraphicsPipelineClient::new(Box::new(gfx_handler), h264_decoder);
                             drdynvc_client.attach_dynamic_channel(gfx_client);
                             connector.attach_static_channel(drdynvc_client);
