@@ -1,6 +1,8 @@
+mod input_capture;
 mod keys;
 
 use eframe::egui::{self, Align, Color32, ColorImage, Key, Layout, RichText, TextureHandle, TextureOptions, Vec2};
+use input_capture::SystemInputCapture;
 use parking_lot::Mutex;
 use rust_rdp::{
     connect_session, disconnect_session, disconnect_session_id, init_runtime, send_key_event,
@@ -499,6 +501,7 @@ struct ConnectionTab {
     mod_ctrl: bool,
     mod_alt: bool,
     mod_super: bool,
+    remote_keys_down: Vec<Key>,
     /// Fractional RDP scroll distance carried between input frames.
     rdp_scroll_remainder: f32,
     keyboard_state: RemoteKeyboardState,
@@ -520,6 +523,7 @@ impl ConnectionTab {
             mod_ctrl: false,
             mod_alt: false,
             mod_super: false,
+            remote_keys_down: Vec::new(),
             rdp_scroll_remainder: 0.0,
             keyboard_state: RemoteKeyboardState::default(),
         }
@@ -577,19 +581,23 @@ struct DesktopApp {
     view_fullscreen: bool,
     /// Sidebar visibility restored when leaving view fullscreen
     sidebar_before_view_fs: bool,
-    /// Auto-hide floating exit hint after entering view fullscreen
-    view_fs_hint_until: Option<Instant>,
     /// True when the remote surface should own keyboard (connected + hover/focus, or view FS).
-    /// While true, host app shortcuts are disabled — only the host key works.
+    /// While true, host app shortcuts are disabled.
     remote_input_active: bool,
+    /// Whether the remote effectively owned input at the end of the previous frame.
+    remote_input_owned_last_frame: bool,
+    /// Native X11/Wayland shortcut inhibition while the remote view owns input.
+    system_input_capture: SystemInputCapture,
+    /// Exact local-only hitbox of the floating Exit control.
+    view_exit_overlay_rect: Option<egui::Rect>,
     toast: Option<Toast>,
     /// Tab id waiting for “close while connected?” confirmation (× / Ctrl+W).
     pending_close_tab_id: Option<u64>,
 }
 
-/// Host key (VirtualBox/VMware/Remmina style): leave remote keyboard / exit view fullscreen.
-/// Combo: Ctrl + Alt + Enter
-const HOST_KEY_HINT: &str = "Ctrl+Alt+Enter";
+/// Small top-center hotspot that reveals the compact Exit control.
+const VIEW_EXIT_REVEAL_HEIGHT: f32 = 32.0;
+const VIEW_EXIT_REVEAL_WIDTH_FRACTION: f32 = 0.10;
 
 /// egui normalizes one native line-wheel tick to 40 points; using 32 here
 /// makes RDP scrolling 25% faster while retaining smooth-delta accumulation.
@@ -636,6 +644,10 @@ impl DesktopApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         init_runtime();
         apply_desktop_style(&cc.egui_ctx);
+        // egui otherwise consumes Ctrl/Cmd +/- for local GUI zoom before the
+        // remote view can own the combination.
+        cc.egui_ctx
+            .options_mut(|options| options.zoom_with_keyboard = false);
 
         let first = ConnectionTab::new(1, Prefs::load());
         Self {
@@ -649,8 +661,10 @@ impl DesktopApp {
             window_fullscreen: false,
             view_fullscreen: false,
             sidebar_before_view_fs: true,
-            view_fs_hint_until: None,
             remote_input_active: false,
+            remote_input_owned_last_frame: false,
+            system_input_capture: SystemInputCapture::new(cc),
+            view_exit_overlay_rect: None,
             toast: None,
             pending_close_tab_id: None,
         }
@@ -750,21 +764,9 @@ impl DesktopApp {
         }
     }
 
-    /// Keyboard is owned by the remote session (no host shortcuts except host key).
+    /// Keyboard is owned by the remote session (no host shortcuts).
     fn keyboard_grabbed(&self) -> bool {
         self.view_fullscreen || self.remote_input_active
-    }
-
-    fn is_host_key_pressed(i: &egui::InputState) -> bool {
-        // Ctrl+Alt+Enter — intentional chord that rarely collides with desktop apps
-        i.modifiers.ctrl
-            && i.modifiers.alt
-            && !i.modifiers.shift
-            && i.key_pressed(Key::Enter)
-    }
-
-    fn is_host_key_chord(modifiers: egui::Modifiers, key: Key) -> bool {
-        modifiers.ctrl && modifiers.alt && !modifiers.shift && key == Key::Enter
     }
 
     /// Hide app chrome so the remote desktop fills the client area.
@@ -774,26 +776,32 @@ impl DesktopApp {
             return;
         }
         self.view_fullscreen = true;
+        self.view_exit_overlay_rect = None;
         self.sidebar_before_view_fs = self.show_sidebar;
         self.show_sidebar = false;
-        self.view_fs_hint_until = Some(Instant::now() + Duration::from_secs(5));
         if !self.window_fullscreen {
             self.window_fullscreen = true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(true));
         }
-        self.show_toast(
-            format!("View fullscreen — host key {HOST_KEY_HINT} to exit"),
-            ToastKind::Info,
-        );
+        if !self.system_input_capture.set_captured(true) {
+            self.show_toast(
+                "The desktop compositor refused keyboard capture; some host shortcuts may remain active",
+                ToastKind::Error,
+            );
+        }
     }
 
     fn exit_view_fullscreen(&mut self, ctx: &egui::Context) {
         if !self.view_fullscreen {
             return;
         }
+        self.release_remote_input_state();
+        self.system_input_capture.set_captured(false);
         self.view_fullscreen = false;
+        self.view_exit_overlay_rect = None;
+        self.remote_input_active = false;
+        self.remote_input_owned_last_frame = false;
         self.show_sidebar = self.sidebar_before_view_fs;
-        self.view_fs_hint_until = None;
         if self.window_fullscreen {
             self.window_fullscreen = false;
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
@@ -927,7 +935,7 @@ impl DesktopApp {
         self.show_toast("Form cleared", ToastKind::Info);
     }
 
-    fn sync_modifiers(&mut self, modifiers: egui::Modifiers) {
+    fn sync_modifiers(&mut self, modifiers: egui::Modifiers, native_super: bool) {
         let tab = self.tab_mut();
         if modifiers.shift != tab.mod_shift {
             send_scancode_event(0x2A, false, if modifiers.shift { 1 } else { 0 });
@@ -941,11 +949,56 @@ impl DesktopApp {
             send_scancode_event(0x38, false, if modifiers.alt { 1 } else { 0 });
             tab.mod_alt = modifiers.alt;
         }
-        let is_super = modifiers.mac_cmd;
+        let is_super = modifiers.mac_cmd || native_super;
         if is_super != tab.mod_super {
             send_scancode_event(0x5B, true, if is_super { 1 } else { 0 });
             tab.mod_super = is_super;
         }
+    }
+
+    /// Release every input state that could otherwise remain pressed on the
+    /// remote host when the user leaves fullscreen with the mouse.
+    fn release_remote_input_state(&mut self) {
+        let tab = self.tab_mut();
+
+        for key in tab.remote_keys_down.drain(..) {
+            if let Some((scancode, extended)) = egui_key_to_scancode(key) {
+                send_scancode_event(scancode, extended || is_extended_scancode(scancode), 0);
+            } else if key == Key::Backspace {
+                send_key_event(8, 0);
+            } else if key == Key::Enter {
+                send_key_event(13, 0);
+            }
+        }
+
+        if tab.mod_shift {
+            send_scancode_event(0x2A, false, 0);
+            tab.mod_shift = false;
+        }
+        if tab.mod_ctrl {
+            send_scancode_event(0x1D, false, 0);
+            tab.mod_ctrl = false;
+        }
+        if tab.mod_alt {
+            send_scancode_event(0x38, false, 0);
+            tab.mod_alt = false;
+        }
+        if tab.mod_super {
+            send_scancode_event(0x5B, true, 0);
+            tab.mod_super = false;
+        }
+
+        if let Some((x, y)) = tab.last_mouse {
+            if tab.left_down {
+                send_mouse_event(x, y, 2);
+                tab.left_down = false;
+            }
+            if tab.right_down {
+                send_mouse_event(x, y, 4);
+                tab.right_down = false;
+            }
+        }
+        tab.keyboard_state = RemoteKeyboardState::default();
     }
 
     fn start_connect(&mut self) {
@@ -1004,6 +1057,11 @@ impl DesktopApp {
 
     /// Disconnect the active tab's session (keeps the tab / form).
     fn disconnect(&mut self, ctx: &egui::Context) {
+        if self.view_fullscreen {
+            self.exit_view_fullscreen(ctx);
+        } else {
+            self.release_remote_input_state();
+        }
         if let Some(sid) = self.tab_mut().backend_session_id.take() {
             disconnect_session_id(sid);
         }
@@ -1013,9 +1071,6 @@ impl DesktopApp {
         tab.left_down = false;
         tab.right_down = false;
         tab.last_mouse = None;
-        if self.view_fullscreen {
-            self.exit_view_fullscreen(ctx);
-        }
         self.show_sidebar = true;
     }
 
@@ -1153,15 +1208,14 @@ impl DesktopApp {
                 ui.separator();
                 if ui
                     .button(if self.view_fullscreen {
-                        format!("Exit view fullscreen\t{HOST_KEY_HINT}")
+                        "Exit view fullscreen"
                     } else {
-                        format!("View fullscreen\t{HOST_KEY_HINT}")
+                        "View fullscreen"
                     })
-                    .on_hover_text(format!(
-                        "Hide chrome so only the remote desktop is visible. \
-                         While the view has keyboard focus, host shortcuts are disabled. \
-                         Press {HOST_KEY_HINT} (host key) to exit."
-                    ))
+                    .on_hover_text(
+                        "Hide chrome and capture the keyboard for the remote desktop. \
+                         Move the pointer to the top edge and click Exit to leave.",
+                    )
                     .clicked()
                 {
                     self.toggle_view_fullscreen(ctx);
@@ -1305,9 +1359,10 @@ impl DesktopApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .selectable_label(self.view_fullscreen, "View FS")
-                    .on_hover_text(format!(
-                        "Fullscreen remote view only — hides chrome. Host key: {HOST_KEY_HINT}"
-                    ))
+                    .on_hover_text(
+                        "Fullscreen remote-only view. Move the pointer to the top edge \
+                         and click Exit to leave.",
+                    )
                     .clicked()
                 {
                     self.toggle_view_fullscreen(ctx);
@@ -1746,7 +1801,7 @@ impl DesktopApp {
         ui.add_space(8.0);
         ui.label(
             RichText::new(
-                "Ctrl+T            New connection\nCtrl+W            Close tab\nCtrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\nCtrl+Alt+Enter    Host key (exit view FS)\n\nWhile the remote view has focus,\nhost shortcuts are disabled.",
+                "Ctrl+T            New connection\nCtrl+W            Close tab\nCtrl+O            Open file\nCtrl+Return       Connect\nCtrl+S            Save as…\nCtrl+D            Disconnect\n\nIn View Fullscreen, all keyboard input\ngoes to remote. Move to the top edge\nand click Exit to leave.",
             )
             .small()
             .monospace()
@@ -1970,7 +2025,15 @@ impl DesktopApp {
                 ui.input(|i| i.pointer.latest_pos().filter(|p| rect.contains(*p)))
             });
 
-        if let Some(pos) = pointer {
+        let pointer_over_exit = view_fullscreen
+            && pointer
+                .and_then(|position| {
+                    self.view_exit_overlay_rect
+                        .map(|overlay| overlay.contains(position))
+                })
+                .unwrap_or(false);
+
+        if let Some(pos) = pointer.filter(|_| !pointer_over_exit) {
             if let Some((x, y)) = self.remote_pos(pos, rect) {
                 let tab = self.tab_mut();
                 let moved = tab
@@ -2037,42 +2100,25 @@ impl DesktopApp {
         // Keep keyboard focus on the remote view while active
         response.request_focus();
 
-        // Host key must not be injected into the remote session
-        let host_key_this_frame = ui.input(|i| Self::is_host_key_pressed(i));
-        if host_key_this_frame {
-            let tab = self.tab_mut();
-            if tab.mod_ctrl {
-                send_scancode_event(0x1D, false, 0);
-                tab.mod_ctrl = false;
-            }
-            if tab.mod_alt {
-                send_scancode_event(0x38, false, 0);
-                tab.mod_alt = false;
-            }
-            if tab.mod_shift {
-                send_scancode_event(0x2A, false, 0);
-                tab.mod_shift = false;
-            }
-            if tab.mod_super {
-                send_scancode_event(0x5B, true, 0);
-                tab.mod_super = false;
-            }
-            return;
-        }
-
         let modifiers = ui.input(|i| i.modifiers);
-        self.sync_modifiers(modifiers);
+        let native_super = self.system_input_capture.super_pressed();
+        self.sync_modifiers(modifiers, native_super);
 
         let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
         for event in events {
-            if let egui::Event::Key { key, modifiers, .. } = &event {
-                if Self::is_host_key_chord(*modifiers, *key) {
-                    continue;
-                }
-            }
-
             let transitions = self.tab_mut().keyboard_state.transitions(&event);
             for transition in transitions {
+                {
+                    let keys_down = &mut self.tab_mut().remote_keys_down;
+                    if transition.pressed {
+                        if !keys_down.contains(&transition.key) {
+                            keys_down.push(transition.key);
+                        }
+                    } else {
+                        keys_down.retain(|key| *key != transition.key);
+                    }
+                }
+
                 if let Some((scancode, extended)) = egui_key_to_scancode(transition.key) {
                     let ext = extended || is_extended_scancode(scancode);
                     send_scancode_event(scancode, ext, if transition.pressed { 1 } else { 0 });
@@ -2088,16 +2134,6 @@ impl DesktopApp {
     // ── Global shortcuts ────────────────────────────────────────────────────
 
     fn handle_shortcuts(&mut self, ctx: &egui::Context) {
-        // Host key always works (exit / enter view fullscreen)
-        if ctx.input(|i| Self::is_host_key_pressed(i)) {
-            if self.view_fullscreen {
-                self.exit_view_fullscreen(ctx);
-            } else if matches!(*self.tab().shared.state.lock(), ConnectionState::Connected) {
-                self.enter_view_fullscreen(ctx);
-            }
-            return;
-        }
-
         // Remote owns keyboard: no Ctrl+S / Esc / F11 / … host handling
         if self.keyboard_grabbed() {
             return;
@@ -2114,7 +2150,8 @@ impl DesktopApp {
         let mut zoom_out = false;
 
         ctx.input(|i| {
-            // Require Ctrl without Alt so host key (Ctrl+Alt+Enter) never means Connect
+            // App shortcuts are only available while the remote view does not
+            // own the keyboard.
             if i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::Enter) {
                 connect = true;
             }
@@ -2187,49 +2224,52 @@ impl DesktopApp {
             return;
         }
 
-        let show_hint = self
-            .view_fs_hint_until
-            .map(|t| Instant::now() < t)
+        let (pointer, screen_rect) =
+            ctx.input(|input| (input.pointer.latest_pos(), input.screen_rect()));
+        let reveal_rect = egui::Rect::from_center_size(
+            egui::pos2(
+                screen_rect.center().x,
+                screen_rect.top() + VIEW_EXIT_REVEAL_HEIGHT / 2.0,
+            ),
+            egui::vec2(
+                screen_rect.width() * VIEW_EXIT_REVEAL_WIDTH_FRACTION,
+                VIEW_EXIT_REVEAL_HEIGHT,
+            ),
+        );
+        let near_exit = pointer
+            .map(|position| {
+                reveal_rect.contains(position)
+                    || self
+                        .view_exit_overlay_rect
+                        .map(|overlay| overlay.contains(position))
+                        .unwrap_or(false)
+            })
             .unwrap_or(false);
-        if show_hint {
-            ctx.request_repaint_after(Duration::from_millis(200));
-        }
 
-        let near_top = ctx.input(|i| {
-            i.pointer
-                .latest_pos()
-                .map(|p| p.y < 48.0)
-                .unwrap_or(false)
-        });
-
-        if !show_hint && !near_top {
+        if !near_exit {
+            self.view_exit_overlay_rect = None;
             return;
         }
 
-        egui::Area::new(egui::Id::new("view_fs_overlay"))
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 8.0])
+        let mut exit_clicked = false;
+        let overlay = egui::Area::new(egui::Id::new("view_fs_overlay"))
+            .anchor(egui::Align2::CENTER_TOP, [0.0, 4.0])
             .order(egui::Order::Foreground)
             .show(ctx, |ui| {
                 egui::Frame::new()
                     .fill(Color32::from_black_alpha(200))
                     .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                    .corner_radius(6.0)
-                    .inner_margin(egui::Margin::symmetric(12, 6))
+                    .corner_radius(4.0)
+                    .inner_margin(egui::Margin::symmetric(6, 3))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Keyboard captured — host key {HOST_KEY_HINT}"
-                                ))
-                                .small()
-                                .color(theme::TEXT_DIM),
-                            );
-                            if ui.button(format!("Exit ({HOST_KEY_HINT})")).clicked() {
-                                self.exit_view_fullscreen(ctx);
-                            }
-                        });
+                        exit_clicked = ui.small_button("Exit").clicked();
                     });
             });
+        self.view_exit_overlay_rect = Some(overlay.response.rect);
+
+        if exit_clicked {
+            self.exit_view_fullscreen(ctx);
+        }
     }
 
     fn ui_toast(&mut self, ctx: &egui::Context) {
@@ -2464,7 +2504,7 @@ impl eframe::App for DesktopApp {
                     ui.label("Supports Microsoft RDP and VNC protocols.");
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Version 1.0.2")
+                        RichText::new("Version 1.0.3")
                             .small()
                             .color(theme::TEXT_DIM),
                     );
@@ -2477,11 +2517,23 @@ impl eframe::App for DesktopApp {
         // Floating toast (save feedback, errors, …)
         self.ui_toast(ctx);
 
-        // Host key / shortcuts after the view has marked keyboard grab state
+        // Keep compositor/window-manager shortcuts inhibited whenever the
+        // connected remote surface owns keyboard focus, not only in fullscreen.
+        let window_focused = ctx.input(|input| input.viewport().focused.unwrap_or(true));
+        let remote_owns_input = self.keyboard_grabbed() && window_focused;
+        if self.remote_input_owned_last_frame && !remote_owns_input {
+            self.release_remote_input_state();
+        }
+        self.system_input_capture.set_captured(remote_owns_input);
+        self.remote_input_owned_last_frame = remote_owns_input;
+
+        // App shortcuts after the view has marked keyboard ownership.
         self.handle_shortcuts(ctx);
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.release_remote_input_state();
+        self.system_input_capture.set_captured(false);
         disconnect_session();
     }
 }

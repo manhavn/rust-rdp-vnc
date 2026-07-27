@@ -36,6 +36,11 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="1.0.3" date="2026-07-27">
+      <description>
+        <p>Improve remote input capture, key forwarding, and remote exit hotspot UI.</p>
+      </description>
+    </release>
     <release version="1.0.2" date="2026-07-27">
       <description>
         <p>Improve remote keyboard input forwarding and handle system shortcuts.</p>

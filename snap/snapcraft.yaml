@@ -1,6 +1,6 @@
 name: rust-rdp-vnc
 base: core24
-version: '1.0.2'
+version: '1.0.3'
 summary: RDP and VNC remote desktop client
 description: |
   Rust RDP VNC is a remote desktop client with a shared Rust protocol core.

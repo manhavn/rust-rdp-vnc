@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "rust-rdp-vnc-desktop"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "directories",
  "eframe",
@@ -4239,14 +4239,19 @@ dependencies = [
  "env_logger 0.11.11",
  "log",
  "parking_lot",
+ "raw-window-handle",
  "rfd",
  "rust_rdp",
  "serde",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "x11-dl",
 ]
 
 [[package]]
 name = "rust_rdp"
-version = "1.0.2"
+version = "1.0.3"
 dependencies = [
  "android_logger",
  "anyhow",

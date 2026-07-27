@@ -1,6 +1,6 @@
 [package]
 name = "rust-rdp-vnc-desktop"
-version = "1.0.2"
+version = "1.0.3"
 edition = "2021"
 description = "Rust RDP VNC — Linux desktop RDP/VNC client powered by the rust_rdp core"
 
@@ -18,3 +18,10 @@ parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }
 directories = "5"
 rfd = "0.15"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = { version = "0.31", features = ["system"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
+x11-dl = "2.21"
