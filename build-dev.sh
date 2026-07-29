@@ -15,8 +15,16 @@ echo -e "${CYAN}${BOLD}       ANTIGRAVITY RDP CLIENT - BUILD DEV         ${NC}"
 echo -e "${CYAN}${BOLD}==================================================${NC}"
 echo -e "${YELLOW}Building Rust core library (debug) and Android app (debug)...${NC}"
 
-# Find absolute path of the script directory
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+# Set environment defaults if java/gradle not in PATH
+if [ -z "$JAVA_HOME" ] && [ -d "/home/dev/tools/jdk-17.0.10+7" ]; then
+    export JAVA_HOME="/home/dev/tools/jdk-17.0.10+7"
+    export PATH="$JAVA_HOME/bin:$PATH"
+fi
+if ! command -v gradle &> /dev/null && [ -d "/home/dev/tools/gradle-8.7/bin" ]; then
+    export PATH="/home/dev/tools/gradle-8.7/bin:$PATH"
+fi
 
 # Run gradle debug build, passing rustDebug property
 echo -e "\n${CYAN}Running gradle build task with -PrustDebug...${NC}"

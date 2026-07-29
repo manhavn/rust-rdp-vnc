@@ -22,6 +22,7 @@ use ironrdp_pdu::bitmap::Compression;
 use ironrdp_pdu::surface_commands::SurfaceCommand;
 use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
 use ironrdp_pdu::input::mouse::PointerFlags;
+use ironrdp_pdu::input::mouse_x::{MouseXPdu, PointerXFlags};
 use ironrdp_pdu::input::MousePdu;
 use ironrdp_pdu::geometry::Rectangle;
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
@@ -50,6 +51,7 @@ enum SessionType {
     Vnc {
         input_tx: mpsc::UnboundedSender<vnc::X11Event>,
         button_mask: Arc<Mutex<u8>>,
+        shift_down: Arc<Mutex<bool>>,
     },
 }
 
@@ -151,22 +153,25 @@ impl ironrdp_async::NetworkClient for SimpleNetworkClient {
     }
 }
 
-fn scancode_to_keysym(scancode: u32, _is_extended: bool) -> Option<u32> {
+fn scancode_to_keysym(scancode: u32, _is_extended: bool, shift: bool) -> Option<u32> {
     match scancode {
         // Special Keys
         0x01 => Some(0xff1b), // Escape
         0x0f => Some(0xff09), // Tab
         0x0e => Some(0xff08), // Backspace
         0x1c => Some(0xff0d), // Return
-        0x1d => Some(0xffe3), // Control_L
-        0x38 => Some(0xffe9), // Alt_L
+        0x1d => Some(if _is_extended { 0xffe4 } else { 0xffe3 }), // Control_R / Control_L
+        0x38 => Some(if _is_extended { 0xffe8 } else { 0xffe7 }), // Meta_R / Meta_L (maps to Option/Alt on macOS VNC)
         0x2a => Some(0xffe1), // Shift_L
         0x36 => Some(0xffe2), // Shift_R
-        0x5b => Some(0xffeb), // Super_L (Win)
+        0x5b => Some(0xffeb), // Super_L (Win / Cmd)
+        0x5c => Some(0xffec), // Super_R (Win / Cmd)
         0x3a => Some(0xffe5), // Caps Lock
         0x53 => Some(0xffff), // Delete
         0x52 => Some(0xff63), // Insert
         0x37 => Some(0xff61), // Print Screen
+        0x45 if _is_extended => Some(0xff13), // Pause
+        0x5d if _is_extended => Some(0xff67), // Menu / ContextMenu
         0x47 => Some(0xff50), // Home
         0x4f => Some(0xff57), // End
         0x49 => Some(0xff55), // Page Up
@@ -178,60 +183,71 @@ fn scancode_to_keysym(scancode: u32, _is_extended: bool) -> Option<u32> {
         0x50 => Some(0xff54), // Down
         0x4d => Some(0xff53), // Right
 
-        // Numbers
-        0x02 => Some(0x31), // 1
-        0x03 => Some(0x32), // 2
-        0x04 => Some(0x33), // 3
-        0x05 => Some(0x34), // 4
-        0x06 => Some(0x35), // 5
-        0x07 => Some(0x36), // 6
-        0x08 => Some(0x37), // 7
-        0x09 => Some(0x38), // 8
-        0x0a => Some(0x39), // 9
-        0x0b => Some(0x30), // 0
-        0x0c => Some(0x2d), // -
-        0x0d => Some(0x3d), // =
+        // Numbers & Number Row Shifted Symbols
+        0x02 => Some(if shift { 0x21 } else { 0x31 }), // 1 -> !
+        0x03 => Some(if shift { 0x40 } else { 0x32 }), // 2 -> @
+        0x04 => Some(if shift { 0x23 } else { 0x33 }), // 3 -> #
+        0x05 => Some(if shift { 0x24 } else { 0x34 }), // 4 -> $
+        0x06 => Some(if shift { 0x25 } else { 0x35 }), // 5 -> %
+        0x07 => Some(if shift { 0x5e } else { 0x36 }), // 6 -> ^
+        0x08 => Some(if shift { 0x26 } else { 0x37 }), // 7 -> &
+        0x09 => Some(if shift { 0x2a } else { 0x38 }), // 8 -> *
+        0x0a => Some(if shift { 0x28 } else { 0x39 }), // 9 -> (
+        0x0b => Some(if shift { 0x29 } else { 0x30 }), // 0 -> )
+        0x0c => Some(if shift { 0x5f } else { 0x2d }), // - -> _
+        0x0d => Some(if shift { 0x2b } else { 0x3d }), // = -> +
 
-        // Letters (Lowercase keysyms as default, VNC server applies Shift modifier on its side)
-        0x10 => Some(0x71), // Q
-        0x11 => Some(0x77), // W
-        0x12 => Some(0x65), // E
-        0x13 => Some(0x72), // R
-        0x14 => Some(0x74), // T
-        0x15 => Some(0x79), // Y
-        0x16 => Some(0x75), // U
-        0x17 => Some(0x69), // I
-        0x18 => Some(0x6f), // O
-        0x19 => Some(0x70), // P
+        // Extended Media & System Keys
+        0x20 if _is_extended => Some(0x1008ff12), // Audio Mute
+        0x2e if _is_extended => Some(0x1008ff11), // Audio Lower Volume
+        0x30 if _is_extended => Some(0x1008ff13), // Audio Raise Volume
+        0x22 if _is_extended => Some(0x1008ff14), // Audio Play/Pause
+        0x24 if _is_extended => Some(0x1008ff15), // Audio Stop
+        0x10 if _is_extended => Some(0x1008ff16), // Audio Prev Track
+        0x19 if _is_extended => Some(0x1008ff17), // Audio Next Track
+        0x66 if _is_extended => Some(0x1008ff03), // MonBrightnessDown
+        0x67 if _is_extended => Some(0x1008ff02), // MonBrightnessUp
+
+        // Letters (Shifted -> Uppercase, Unshifted -> Lowercase)
+        0x10 => Some(if shift { 0x51 } else { 0x71 }), // Q / q
+        0x11 => Some(if shift { 0x57 } else { 0x77 }), // W / w
+        0x12 => Some(if shift { 0x45 } else { 0x65 }), // E / e
+        0x13 => Some(if shift { 0x52 } else { 0x72 }), // R / r
+        0x14 => Some(if shift { 0x54 } else { 0x74 }), // T / t
+        0x15 => Some(if shift { 0x59 } else { 0x79 }), // Y / y
+        0x16 => Some(if shift { 0x55 } else { 0x75 }), // U / u
+        0x17 => Some(if shift { 0x49 } else { 0x69 }), // I / i
+        0x18 => Some(if shift { 0x4f } else { 0x6f }), // O / o
+        0x19 => Some(if shift { 0x50 } else { 0x70 }), // P / p
         
-        0x1e => Some(0x61), // A
-        0x1f => Some(0x73), // S
-        0x20 => Some(0x64), // D
-        0x21 => Some(0x66), // F
-        0x22 => Some(0x67), // G
-        0x23 => Some(0x68), // H
-        0x24 => Some(0x6a), // J
-        0x25 => Some(0x6b), // K
-        0x26 => Some(0x6c), // L
+        0x1e => Some(if shift { 0x41 } else { 0x61 }), // A / a
+        0x1f => Some(if shift { 0x53 } else { 0x73 }), // S / s
+        0x20 => Some(if shift { 0x44 } else { 0x64 }), // D / d
+        0x21 => Some(if shift { 0x46 } else { 0x66 }), // F / f
+        0x22 => Some(if shift { 0x47 } else { 0x67 }), // G / g
+        0x23 => Some(if shift { 0x48 } else { 0x68 }), // H / h
+        0x24 => Some(if shift { 0x4a } else { 0x6a }), // J / j
+        0x25 => Some(if shift { 0x4b } else { 0x6b }), // K / k
+        0x26 => Some(if shift { 0x4c } else { 0x6c }), // L / l
         
-        0x2c => Some(0x7a), // Z
-        0x2d => Some(0x78), // X
-        0x2e => Some(0x63), // C
-        0x2f => Some(0x76), // V
-        0x30 => Some(0x62), // B
-        0x31 => Some(0x6e), // N
-        0x32 => Some(0x6d), // M
+        0x2c => Some(if shift { 0x5a } else { 0x7a }), // Z / z
+        0x2d => Some(if shift { 0x58 } else { 0x78 }), // X / x
+        0x2e => Some(if shift { 0x43 } else { 0x63 }), // C / c
+        0x2f => Some(if shift { 0x56 } else { 0x76 }), // V / v
+        0x30 => Some(if shift { 0x42 } else { 0x62 }), // B / b
+        0x31 => Some(if shift { 0x4e } else { 0x6e }), // N / n
+        0x32 => Some(if shift { 0x4d } else { 0x6d }), // M / m
 
         // Symbols
-        0x1a => Some(0x5b), // [
-        0x1b => Some(0x5d), // ]
-        0x2b => Some(0x5c), // \
-        0x27 => Some(0x3b), // ;
-        0x28 => Some(0x27), // '
-        0x29 => Some(0x60), // `
-        0x33 => Some(0x2c), // ,
-        0x34 => Some(0x2e), // .
-        0x35 => Some(0x2f), // /
+        0x1a => Some(if shift { 0x7b } else { 0x5b }), // [ -> {
+        0x1b => Some(if shift { 0x7d } else { 0x5d }), // ] -> }
+        0x2b => Some(if shift { 0x7c } else { 0x5c }), // \ -> |
+        0x27 => Some(if shift { 0x3a } else { 0x3b }), // ; -> :
+        0x28 => Some(if shift { 0x22 } else { 0x27 }), // ' -> "
+        0x29 => Some(if shift { 0x7e } else { 0x60 }), // ` -> ~
+        0x33 => Some(if shift { 0x3c } else { 0x2c }), // , -> <
+        0x34 => Some(if shift { 0x3e } else { 0x2e }), // . -> >
+        0x35 => Some(if shift { 0x3f } else { 0x2f }), // / -> ?
         0x39 => Some(0x20), // Space
 
         // Function Keys
@@ -247,6 +263,10 @@ fn scancode_to_keysym(scancode: u32, _is_extended: bool) -> Option<u32> {
         0x44 => Some(0xffc7), // F10
         0x57 => Some(0xffc8), // F11
         0x58 => Some(0xffc9), // F12
+
+        // Lock Keys
+        0x45 => Some(0xff7f), // Num Lock
+        0x46 => Some(0xff14), // Scroll Lock
 
         _ => None,
     }
@@ -960,6 +980,7 @@ pub fn connect_session(
             session_type: SessionType::Vnc {
                 input_tx: vnc_tx,
                 button_mask,
+                shift_down: Arc::new(Mutex::new(false)),
             },
             callback: callback.clone(),
         }));
@@ -1644,35 +1665,85 @@ pub fn disconnect_session() {
     ACTIVE_SESSION_ID.store(0, AtomicOrdering::SeqCst);
 }
 
-/// action: 0 = move, 1 = left down, 2 = left up, 3 = right down, 4 = right up
+/// action:
+/// 0 = move,
+/// 1 = left down, 2 = left up,
+/// 3 = right down, 4 = right up,
+/// 5 = middle down, 6 = middle up,
+/// 7 = extra1 (back/prev) down, 8 = extra1 up,
+/// 9 = extra2 (next/forward) down, 10 = extra2 up
 pub fn send_mouse_event(x: i32, y: i32, action: i32) {
     with_active_session(|sess| {
         match &sess.session_type {
             SessionType::Rdp { input_tx } => {
-                let flags = match action {
-                    0 => PointerFlags::MOVE,
-                    1 => PointerFlags::DOWN | PointerFlags::LEFT_BUTTON,
-                    2 => PointerFlags::LEFT_BUTTON,
-                    3 => PointerFlags::DOWN | PointerFlags::RIGHT_BUTTON,
-                    4 => PointerFlags::RIGHT_BUTTON,
-                    _ => PointerFlags::MOVE,
-                };
-                let mouse_pdu = MousePdu {
-                    flags,
-                    number_of_wheel_rotation_units: 0,
-                    x_position: x as u16,
-                    y_position: y as u16,
-                };
-                let event = FastPathInputEvent::MouseEvent(mouse_pdu);
-                let _ = input_tx.send(event);
+                match action {
+                    7 => {
+                        let mouse_pdu = MouseXPdu {
+                            flags: PointerXFlags::DOWN | PointerXFlags::BUTTON1,
+                            x_position: x as u16,
+                            y_position: y as u16,
+                        };
+                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+                    }
+                    8 => {
+                        let mouse_pdu = MouseXPdu {
+                            flags: PointerXFlags::BUTTON1,
+                            x_position: x as u16,
+                            y_position: y as u16,
+                        };
+                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+                    }
+                    9 => {
+                        let mouse_pdu = MouseXPdu {
+                            flags: PointerXFlags::DOWN | PointerXFlags::BUTTON2,
+                            x_position: x as u16,
+                            y_position: y as u16,
+                        };
+                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+                    }
+                    10 => {
+                        let mouse_pdu = MouseXPdu {
+                            flags: PointerXFlags::BUTTON2,
+                            x_position: x as u16,
+                            y_position: y as u16,
+                        };
+                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+                    }
+                    _ => {
+                        let flags = match action {
+                            0 => PointerFlags::MOVE,
+                            1 => PointerFlags::DOWN | PointerFlags::LEFT_BUTTON,
+                            2 => PointerFlags::LEFT_BUTTON,
+                            3 => PointerFlags::DOWN | PointerFlags::RIGHT_BUTTON,
+                            4 => PointerFlags::RIGHT_BUTTON,
+                            5 => PointerFlags::DOWN | PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                            6 => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                            _ => PointerFlags::MOVE,
+                        };
+                        let mouse_pdu = MousePdu {
+                            flags,
+                            number_of_wheel_rotation_units: 0,
+                            x_position: x as u16,
+                            y_position: y as u16,
+                        };
+                        let event = FastPathInputEvent::MouseEvent(mouse_pdu);
+                        let _ = input_tx.send(event);
+                    }
+                }
             }
-            SessionType::Vnc { input_tx, button_mask } => {
+            SessionType::Vnc { input_tx, button_mask, .. } => {
                 let mut mask = button_mask.lock().unwrap();
                 match action {
                     1 => *mask |= 1,
                     2 => *mask &= !1,
                     3 => *mask |= 4,
                     4 => *mask &= !4,
+                    5 => *mask |= 2,
+                    6 => *mask &= !2,
+                    7 => *mask |= 64,
+                    8 => *mask &= !64,
+                    9 => *mask |= 128,
+                    10 => *mask &= !128,
                     _ => {}
                 }
                 let mouse_event = vnc::ClientMouseEvent {
@@ -1740,7 +1811,7 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                     let _ = input_tx.send(FastPathInputEvent::MouseEvent(mouse_pdu));
                 }
             }
-            SessionType::Vnc { input_tx, button_mask } => {
+            SessionType::Vnc { input_tx, button_mask, .. } => {
                 // Positive units = scroll up (button 4). Negative = scroll down (button 5).
                 let mask = button_mask.lock().unwrap();
                 let wheel_bit = if units > 0 { 8 } else { 16 };
@@ -1753,6 +1824,66 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                 let _ = input_tx.send(event_move);
 
                 // Map Windows-style units to VNC click steps (≈120 units per step).
+                let steps = vnc_wheel_steps(units);
+                for _ in 0..steps {
+                    let event_wheel_press = vnc::X11Event::PointerEvent(vnc::ClientMouseEvent {
+                        position_x: x as u16,
+                        position_y: y as u16,
+                        bottons: *mask | wheel_bit,
+                    });
+                    let _ = input_tx.send(event_wheel_press);
+
+                    let event_wheel_release = vnc::X11Event::PointerEvent(vnc::ClientMouseEvent {
+                        position_x: x as u16,
+                        position_y: y as u16,
+                        bottons: *mask,
+                    });
+                    let _ = input_tx.send(event_wheel_release);
+                }
+            }
+        }
+    });
+}
+
+pub fn send_mouse_horizontal_wheel_event(x: i32, y: i32, units: i32) {
+    if units == 0 {
+        return;
+    }
+    // Invert horizontal units so rightward scroll / tilt moves content right on remote
+    let units = -units;
+    with_active_session(|sess| {
+        match &sess.session_type {
+            SessionType::Rdp { input_tx } => {
+                let move_pdu = MousePdu {
+                    flags: PointerFlags::MOVE,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: x as u16,
+                    y_position: y as u16,
+                };
+                let _ = input_tx.send(FastPathInputEvent::MouseEvent(move_pdu));
+
+                for wheel_units in rdp_wheel_rotation_chunks(units) {
+                    let mouse_pdu = MousePdu {
+                        flags: PointerFlags::HORIZONTAL_WHEEL,
+                        number_of_wheel_rotation_units: wheel_units,
+                        x_position: x as u16,
+                        y_position: y as u16,
+                    };
+                    let _ = input_tx.send(FastPathInputEvent::MouseEvent(mouse_pdu));
+                }
+            }
+            SessionType::Vnc { input_tx, button_mask, .. } => {
+                let mask = button_mask.lock().unwrap();
+                // Button 6 (64) is Scroll Right, Button 5 (32) is Scroll Left
+                let wheel_bit = if units > 0 { 64 } else { 32 };
+
+                let event_move = vnc::X11Event::PointerEvent(vnc::ClientMouseEvent {
+                    position_x: x as u16,
+                    position_y: y as u16,
+                    bottons: *mask,
+                });
+                let _ = input_tx.send(event_move);
+
                 let steps = vnc_wheel_steps(units);
                 for _ in 0..steps {
                     let event_wheel_press = vnc::X11Event::PointerEvent(vnc::ClientMouseEvent {
@@ -1829,8 +1960,12 @@ pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
                 let event = FastPathInputEvent::KeyboardEvent(flags, scancode as u8);
                 let _ = input_tx.send(event);
             }
-            SessionType::Vnc { input_tx, .. } => {
-                if let Some(keysym) = scancode_to_keysym(scancode as u32, is_extended) {
+            SessionType::Vnc { input_tx, shift_down, .. } => {
+                if scancode == 0x2A || scancode == 0x36 {
+                    *shift_down.lock().unwrap() = down;
+                }
+                let is_shift = *shift_down.lock().unwrap();
+                if let Some(keysym) = scancode_to_keysym(scancode as u32, is_extended, is_shift) {
                     let event = vnc::X11Event::KeyEvent(vnc::ClientKeyEvent {
                         keycode: keysym,
                         down,

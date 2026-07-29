@@ -180,7 +180,12 @@ generate_cargo_sources() {
     exit 1
   fi
 
-  # tomli, tomlkit, pyyaml, and aiohttp required by flatpak-cargo-generator.py
+  # Ensure pip and required modules (tomli, tomlkit, pyyaml, aiohttp) are available
+  if ! python3 -m pip --version >/dev/null 2>&1; then
+    echo "    pip not found, bootstrapping via get-pip.py…"
+    curl -sSL https://bootstrap.pypa.io/get-pip.py | python3 - --user --break-system-packages 2>/dev/null || true
+  fi
+
   python3 -m pip install --user --break-system-packages -q toml tomlkit pyyaml aiohttp 2>/dev/null \
     || python3 -m pip install --user -q toml tomlkit pyyaml aiohttp 2>/dev/null \
     || true

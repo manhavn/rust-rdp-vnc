@@ -4231,7 +4231,7 @@ dependencies = [
 
 [[package]]
 name = "rust-rdp-vnc-desktop"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "directories",
  "eframe",
@@ -4251,7 +4251,7 @@ dependencies = [
 
 [[package]]
 name = "rust_rdp"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "android_logger",
  "anyhow",

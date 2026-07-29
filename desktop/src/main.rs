@@ -6,8 +6,8 @@ use input_capture::SystemInputCapture;
 use parking_lot::Mutex;
 use rust_rdp::{
     connect_session, disconnect_session, disconnect_session_id, init_runtime, send_key_event,
-    send_mouse_event, send_mouse_wheel_event, send_scancode_event, set_active_session,
-    SessionCallback,
+    send_mouse_event, send_mouse_horizontal_wheel_event, send_mouse_wheel_event,
+    send_scancode_event, set_active_session, SessionCallback,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -496,7 +496,12 @@ struct ConnectionTab {
     last_frame_gen: u64,
     last_mouse: Option<(i32, i32)>,
     left_down: bool,
+    left_down_pos: Option<(i32, i32)>,
+    left_down_dragged: bool,
     right_down: bool,
+    middle_down: bool,
+    extra1_down: bool,
+    extra2_down: bool,
     mod_shift: bool,
     mod_ctrl: bool,
     mod_alt: bool,
@@ -504,6 +509,7 @@ struct ConnectionTab {
     remote_keys_down: Vec<Key>,
     /// Fractional RDP scroll distance carried between input frames.
     rdp_scroll_remainder: f32,
+    rdp_hscroll_remainder: f32,
     keyboard_state: RemoteKeyboardState,
 }
 
@@ -518,13 +524,19 @@ impl ConnectionTab {
             last_frame_gen: 0,
             last_mouse: None,
             left_down: false,
+            left_down_pos: None,
+            left_down_dragged: false,
             right_down: false,
+            middle_down: false,
+            extra1_down: false,
+            extra2_down: false,
             mod_shift: false,
             mod_ctrl: false,
             mod_alt: false,
             mod_super: false,
             remote_keys_down: Vec::new(),
             rdp_scroll_remainder: 0.0,
+            rdp_hscroll_remainder: 0.0,
             keyboard_state: RemoteKeyboardState::default(),
         }
     }
@@ -817,6 +829,7 @@ impl DesktopApp {
         }
     }
 
+    #[allow(dead_code)]
     fn set_window_fullscreen(&mut self, ctx: &egui::Context, on: bool) {
         self.window_fullscreen = on;
         ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(on));
@@ -997,6 +1010,18 @@ impl DesktopApp {
                 send_mouse_event(x, y, 4);
                 tab.right_down = false;
             }
+            if tab.middle_down {
+                send_mouse_event(x, y, 6);
+                tab.middle_down = false;
+            }
+            if tab.extra1_down {
+                send_mouse_event(x, y, 8);
+                tab.extra1_down = false;
+            }
+            if tab.extra2_down {
+                send_mouse_event(x, y, 10);
+                tab.extra2_down = false;
+            }
         }
         tab.keyboard_state = RemoteKeyboardState::default();
     }
@@ -1070,6 +1095,9 @@ impl DesktopApp {
         *tab.shared.status.lock() = "Disconnected".into();
         tab.left_down = false;
         tab.right_down = false;
+        tab.middle_down = false;
+        tab.extra1_down = false;
+        tab.extra2_down = false;
         tab.last_mouse = None;
         self.show_sidebar = true;
     }
@@ -1232,152 +1260,113 @@ impl DesktopApp {
                 }
             });
 
+            ui.menu_button("Actions", |ui| {
+                if ui.button("Send Ctrl+Alt+Del\tCtrl+Alt+End").clicked() {
+                    send_scancode_event(0x1D, true, 1);
+                    send_scancode_event(0x38, false, 1);
+                    send_scancode_event(0x53, true, 1);
+                    send_scancode_event(0x53, true, 0);
+                    send_scancode_event(0x38, false, 0);
+                    send_scancode_event(0x1D, true, 0);
+                    ui.close_menu();
+                }
+                if ui.button("Send PrintScreen (PrtScn)").clicked() {
+                    send_scancode_event(0x37, true, 1);
+                    send_scancode_event(0x37, true, 0);
+                    ui.close_menu();
+                }
+                if ui.button("Send Context Menu").clicked() {
+                    send_scancode_event(0x5D, true, 1);
+                    send_scancode_event(0x5D, true, 0);
+                    ui.close_menu();
+                }
+
+                ui.separator();
+
+                ui.menu_button("Volume & Sound", |ui| {
+                    if ui.button("Volume Up (Vol+)").clicked() {
+                        send_scancode_event(0x30, true, 1);
+                        send_scancode_event(0x30, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Volume Down (Vol-)").clicked() {
+                        send_scancode_event(0x2E, true, 1);
+                        send_scancode_event(0x2E, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Mute Sound").clicked() {
+                        send_scancode_event(0x20, true, 1);
+                        send_scancode_event(0x20, true, 0);
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Display & Brightness", |ui| {
+                    if ui.button("Increase Brightness (Bri+)").clicked() {
+                        send_scancode_event(0x67, true, 1);
+                        send_scancode_event(0x67, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Decrease Brightness (Bri-)").clicked() {
+                        send_scancode_event(0x66, true, 1);
+                        send_scancode_event(0x66, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Project / Display Switch (Win+P)").clicked() {
+                        send_scancode_event(0x5B, true, 1);
+                        send_scancode_event(0x19, false, 1);
+                        send_scancode_event(0x19, false, 0);
+                        send_scancode_event(0x5B, true, 0);
+                        ui.close_menu();
+                    }
+                });
+
+                ui.menu_button("Media Controls", |ui| {
+                    if ui.button("Play / Pause").clicked() {
+                        send_scancode_event(0x22, true, 1);
+                        send_scancode_event(0x22, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Stop").clicked() {
+                        send_scancode_event(0x24, true, 1);
+                        send_scancode_event(0x24, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Next Track").clicked() {
+                        send_scancode_event(0x19, true, 1);
+                        send_scancode_event(0x19, true, 0);
+                        ui.close_menu();
+                    }
+                    if ui.button("Previous Track").clicked() {
+                        send_scancode_event(0x10, true, 1);
+                        send_scancode_event(0x10, true, 0);
+                        ui.close_menu();
+                    }
+                });
+            });
+
             ui.menu_button("Help", |ui| {
                 if ui.button("About Rust RDP VNC").clicked() {
                     self.show_about = true;
                     ui.close_menu();
                 }
             });
-        });
-    }
 
-    // ── Toolbar ─────────────────────────────────────────────────────────────
-
-    fn ui_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let state = *self.tab().shared.state.lock();
-        let connected = state == ConnectionState::Connected;
-        let connecting = state == ConnectionState::Connecting;
-        let can_connect = self.can_connect();
-        let tab_id = self.tab().tab_id;
-
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-
-            // Sidebar toggle
-            if ui
-                .selectable_label(self.show_sidebar, "☰ Panel")
-                .on_hover_text("Show or hide the connection panel")
-                .clicked()
-            {
-                self.show_sidebar = !self.show_sidebar;
-            }
-
-            ui.separator();
-
-            if ui
-                .button("+ New")
-                .on_hover_text("New connection tab (Ctrl+T)")
-                .clicked()
-            {
-                self.new_connection_tab();
-                if self.view_fullscreen {
-                    self.exit_view_fullscreen(ctx);
-                }
-            }
-
-            ui.separator();
-
-            if connecting {
-                if ui
-                    .add(egui::Button::new(RichText::new("Cancel").color(theme::DANGER)))
-                    .clicked()
-                {
-                    self.disconnect(ctx);
-                }
-            } else if connected {
-                if ui
-                    .add(egui::Button::new(
-                        RichText::new("Disconnect").color(theme::DANGER),
-                    ))
-                    .clicked()
-                {
-                    self.disconnect(ctx);
-                }
-            } else {
-                if ui
-                    .button("Open")
-                    .on_hover_text("Open a .rdp / .vnc file and connect (Ctrl+O)")
-                    .clicked()
-                {
-                    self.open_connection();
-                }
-
-                let btn = egui::Button::new(RichText::new("Connect").strong().color(Color32::WHITE))
-                    .fill(if can_connect {
-                        theme::ACCENT
-                    } else {
-                        theme::BORDER
-                    });
-                if ui
-                    .add_enabled(can_connect, btn)
-                    .on_hover_text("Connect to the remote host (Ctrl+Return)")
-                    .clicked()
-                {
-                    self.start_connect();
-                }
-            }
-
-            ui.separator();
-
-            // Protocol / host / port for the active tab
-            let fields_enabled = !(connected || connecting);
-            {
-                let tab = self.tab_mut();
-                ui.label(RichText::new("Protocol").color(theme::TEXT_DIM).small());
-                egui::ComboBox::from_id_salt(format!("proto_{tab_id}"))
-                    .selected_text(&tab.prefs.mode)
-                    .width(72.0)
-                    .show_ui(ui, |ui| {
-                        for mode in ["RDP", "VNC"] {
-                            if ui
-                                .selectable_value(&mut tab.prefs.mode, mode.to_string(), mode)
-                                .clicked()
-                            {
-                                if mode == "VNC" && tab.prefs.port == "3389" {
-                                    tab.prefs.port = "5900".into();
-                                } else if mode == "RDP" && tab.prefs.port == "5900" {
-                                    tab.prefs.port = "3389".into();
-                                }
-                            }
-                        }
-                    });
-
-                ui.label(RichText::new("Host").color(theme::TEXT_DIM).small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut tab.prefs.host)
-                        .desired_width(180.0)
-                        .interactive(fields_enabled),
-                );
-                ui.label(RichText::new("Port").color(theme::TEXT_DIM).small());
-                ui.add(
-                    egui::TextEdit::singleline(&mut tab.prefs.port)
-                        .desired_width(56.0)
-                        .interactive(fields_enabled),
-                );
-            }
-
+            // ── Right side block pushed to topbar ──
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .selectable_label(self.view_fullscreen, "View FS")
+                    .selectable_label(self.view_fullscreen, "Fullscreen (F11)")
                     .on_hover_text(
-                        "Fullscreen remote-only view. Move the pointer to the top edge \
-                         and click Exit to leave.",
+                        "Fullscreen remote-only view (F11). Move pointer to top edge to exit.",
                     )
                     .clicked()
                 {
                     self.toggle_view_fullscreen(ctx);
                 }
-                if ui
-                    .selectable_label(self.window_fullscreen, "Win FS")
-                    .on_hover_text("OS window fullscreen (keeps menu/toolbar)")
-                    .clicked()
-                {
-                    self.set_window_fullscreen(ctx, !self.window_fullscreen);
-                }
 
                 ui.separator();
 
-                if ui.button("1:1").on_hover_text("Actual size").clicked() {
+                if ui.button("1:1").on_hover_text("Actual size (100%)").clicked() {
                     self.fit_mode = FitMode::Actual;
                     self.zoom = 1.0;
                 }
@@ -1389,7 +1378,7 @@ impl DesktopApp {
                 if ui.button("−").on_hover_text("Zoom out").clicked() {
                     self.zoom = (self.zoom / 1.1).max(0.25);
                 }
-                ui.label(
+                    ui.label(
                     RichText::new(format!("{:.0}%", self.zoom * 100.0))
                         .monospace()
                         .color(theme::TEXT_DIM),
@@ -1401,6 +1390,51 @@ impl DesktopApp {
         });
     }
 
+    // ── Toolbar ─────────────────────────────────────────────────────────────
+
+    fn ui_toolbar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+
+            // 1. Panel (Sidebar toggle)
+            if ui
+                .selectable_label(self.show_sidebar, "☰ Panel")
+                .on_hover_text("Show or hide the connection panel")
+                .clicked()
+            {
+                self.show_sidebar = !self.show_sidebar;
+            }
+
+            ui.separator();
+
+            // 2. + New
+            if ui
+                .button("+ New")
+                .on_hover_text("New connection tab (Ctrl+T)")
+                .clicked()
+            {
+                self.new_connection_tab();
+                if self.view_fullscreen {
+                    self.exit_view_fullscreen(ctx);
+                }
+            }
+
+            // 3. Open
+            if ui
+                .button("Open")
+                .on_hover_text("Open a .rdp / .vnc file and connect (Ctrl+O)")
+                .clicked()
+            {
+                self.open_connection();
+            }
+
+            ui.separator();
+
+            // 4. Session tabs & [ + ] button
+            self.ui_tab_bar(ui, ctx);
+        });
+    }
+
     // ── Tab bar ─────────────────────────────────────────────────────────────
 
     fn ui_tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -1408,77 +1442,84 @@ impl DesktopApp {
         let mut close: Option<usize> = None;
         let mut new_tab = false;
 
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
+        egui::ScrollArea::horizontal()
+            .id_salt("session_tabs_scroll")
+            .show(ui, |ui| {
+                ui.horizontal_centered(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
 
-            for (i, tab) in self.tabs.iter().enumerate() {
-                let selected = i == self.active_tab;
-                let title = tab.tab_title();
-                let state = *tab.shared.state.lock();
+                    for (i, tab) in self.tabs.iter().enumerate() {
+                        let selected = i == self.active_tab;
+                        let title = tab.tab_title();
+                        let state = *tab.shared.state.lock();
 
-                let fill = if selected {
-                    theme::PANEL_ALT
-                } else {
-                    theme::PANEL
-                };
-                let stroke = if selected {
-                    egui::Stroke::new(1.0_f32, theme::ACCENT)
-                } else {
-                    egui::Stroke::new(1.0_f32, theme::BORDER)
-                };
+                        let fill = if selected {
+                            theme::PANEL_ALT
+                        } else {
+                            theme::PANEL
+                        };
+                        let stroke = if selected {
+                            egui::Stroke::new(1.0_f32, theme::ACCENT)
+                        } else {
+                            egui::Stroke::new(1.0_f32, theme::BORDER)
+                        };
 
-                egui::Frame::new()
-                    .fill(fill)
-                    .stroke(stroke)
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(8, 4))
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            // Status dot
-                            let (dot, _) =
-                                ui.allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
-                            ui.painter()
-                                .circle_filled(dot.center(), 3.0, state.color());
+                        egui::Frame::new()
+                            .fill(fill)
+                            .stroke(stroke)
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.horizontal_centered(|ui| {
+                                    ui.spacing_mut().item_spacing.x = 4.0;
+                                    // Status dot
+                                    let (dot, _) = ui
+                                        .allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
+                                    ui.painter()
+                                        .circle_filled(dot.center(), 3.0, state.color());
 
-                            let label = RichText::new(title).small();
-                            if ui
-                                .add(egui::Label::new(if selected {
-                                    label.strong().color(theme::TEXT)
-                                } else {
-                                    label.color(theme::TEXT_DIM)
-                                }).sense(egui::Sense::click()))
-                                .on_hover_text("Switch to this connection")
-                                .clicked()
-                            {
-                                select = Some(i);
-                            }
+                                    let label = RichText::new(title).small();
+                                    if ui
+                                        .add(
+                                            egui::Label::new(if selected {
+                                                label.strong().color(theme::TEXT)
+                                            } else {
+                                                label.color(theme::TEXT_DIM)
+                                            })
+                                            .sense(egui::Sense::click()),
+                                        )
+                                        .on_hover_text("Switch to this connection")
+                                        .clicked()
+                                    {
+                                        select = Some(i);
+                                    }
 
-                            let close_resp = ui
-                                .add(
-                                    egui::Button::new(RichText::new("×").size(14.0))
-                                        .frame(false)
-                                        .min_size(Vec2::new(16.0, 16.0)),
-                                )
-                                .on_hover_text("Close tab and disconnect");
-                            if close_resp.clicked() {
-                                close = Some(i);
-                            }
-                        });
-                    });
-            }
+                                    let close_resp = ui
+                                        .add(
+                                            egui::Button::new(RichText::new("×").size(13.0))
+                                                .frame(false)
+                                                .min_size(Vec2::new(14.0, 14.0)),
+                                        )
+                                        .on_hover_text("Close tab and disconnect");
+                                    if close_resp.clicked() {
+                                        close = Some(i);
+                                    }
+                                });
+                            });
+                    }
 
-            if ui
-                .add(
-                    egui::Button::new(RichText::new("+").strong())
-                        .min_size(Vec2::new(28.0, 24.0)),
-                )
-                .on_hover_text("New connection (Ctrl+T)")
-                .clicked()
-            {
-                new_tab = true;
-            }
-        });
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("+").strong())
+                                .min_size(Vec2::new(24.0, 22.0)),
+                        )
+                        .on_hover_text("New connection (Ctrl+T)")
+                        .clicked()
+                    {
+                        new_tab = true;
+                    }
+                });
+            });
 
         if let Some(i) = select {
             self.select_tab(i);
@@ -2015,6 +2056,14 @@ impl DesktopApp {
         let view_focused = response.has_focus() || response.hovered();
         if connected && (view_focused || view_fullscreen) {
             self.remote_input_active = true;
+            let modifiers = ui.input(|i| i.modifiers);
+            let native_super = self.system_input_capture.super_pressed();
+            self.sync_modifiers(modifiers, native_super);
+
+            let native_events = self.system_input_capture.poll_native_events();
+            for (scancode, ext, pressed) in native_events {
+                send_scancode_event(scancode, ext, if pressed { 1 } else { 0 });
+            }
         }
 
         // Prefer hover position so mouse move + wheel work without a button held.
@@ -2040,7 +2089,25 @@ impl DesktopApp {
                     .last_mouse
                     .map(|(lx, ly)| lx != x || ly != y)
                     .unwrap_or(true);
-                if moved {
+
+                let is_touchpad_jitter = if tab.left_down && !tab.left_down_dragged {
+                    if let Some((ox, oy)) = tab.left_down_pos {
+                        let dx = (x - ox).abs();
+                        let dy = (y - oy).abs();
+                        if dx > 8 || dy > 8 {
+                            tab.left_down_dragged = true;
+                            false
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if moved && !is_touchpad_jitter {
                     send_mouse_event(x, y, 0);
                     tab.last_mouse = Some((x, y));
                 }
@@ -2051,34 +2118,96 @@ impl DesktopApp {
                         i.pointer.button_released(egui::PointerButton::Primary),
                         i.pointer.button_pressed(egui::PointerButton::Secondary),
                         i.pointer.button_released(egui::PointerButton::Secondary),
+                        i.pointer.button_pressed(egui::PointerButton::Middle),
+                        i.pointer.button_released(egui::PointerButton::Middle),
+                        i.pointer.button_pressed(egui::PointerButton::Extra1),
+                        i.pointer.button_released(egui::PointerButton::Extra1),
+                        i.pointer.button_pressed(egui::PointerButton::Extra2),
+                        i.pointer.button_released(egui::PointerButton::Extra2),
                     )
                 });
 
                 if buttons.0 {
+                    if tab.left_down {
+                        send_mouse_event(x, y, 2);
+                        tab.left_down = false;
+                        tab.left_down_pos = None;
+                        tab.left_down_dragged = false;
+                    }
                     send_mouse_event(x, y, 1);
                     tab.left_down = true;
+                    tab.left_down_pos = Some((x, y));
+                    tab.left_down_dragged = false;
                 }
                 if buttons.1 && tab.left_down {
+                    if buttons.0 {
+                        // Defer release to next frame so mouse down has non-zero duration on remote OS
+                        ui.ctx().request_repaint();
+                    } else {
+                        send_mouse_event(x, y, 2);
+                        tab.left_down = false;
+                        tab.left_down_pos = None;
+                        tab.left_down_dragged = false;
+                    }
+                }
+                if !buttons.0 && !buttons.1 && tab.left_down && !ui.ctx().input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
                     send_mouse_event(x, y, 2);
                     tab.left_down = false;
+                    tab.left_down_pos = None;
+                    tab.left_down_dragged = false;
                 }
+
                 if buttons.2 {
                     send_mouse_event(x, y, 3);
                     tab.right_down = true;
                 }
                 if buttons.3 && tab.right_down {
+                    if buttons.2 {
+                        ui.ctx().request_repaint();
+                    } else {
+                        send_mouse_event(x, y, 4);
+                        tab.right_down = false;
+                    }
+                }
+                if !buttons.2 && !buttons.3 && tab.right_down && !ui.ctx().input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
                     send_mouse_event(x, y, 4);
                     tab.right_down = false;
+                }
+                if buttons.4 {
+                    send_mouse_event(x, y, 5);
+                    tab.middle_down = true;
+                }
+                if buttons.5 && tab.middle_down {
+                    send_mouse_event(x, y, 6);
+                    tab.middle_down = false;
+                }
+                if buttons.6 {
+                    send_mouse_event(x, y, 7);
+                    tab.extra1_down = true;
+                }
+                if buttons.7 && tab.extra1_down {
+                    send_mouse_event(x, y, 8);
+                    tab.extra1_down = false;
+                }
+                if buttons.8 {
+                    send_mouse_event(x, y, 9);
+                    tab.extra2_down = true;
+                }
+                if buttons.9 && tab.extra2_down {
+                    send_mouse_event(x, y, 10);
+                    tab.extra2_down = false;
                 }
 
                 // Wheel → always remote when over the surface.
                 if response.hovered() || view_fullscreen {
                     let mut scroll_y = raw_scroll.y;
-                    if scroll_y == 0.0 {
+                    let mut scroll_x = raw_scroll.x;
+                    if scroll_y == 0.0 && scroll_x == 0.0 {
                         ui.input(|i| {
                             for ev in &i.events {
                                 if let egui::Event::MouseWheel { delta, .. } = ev {
                                     scroll_y += delta.y;
+                                    scroll_x += delta.x;
                                 }
                             }
                         });
@@ -2088,6 +2217,11 @@ impl DesktopApp {
                         remote_wheel_units(scroll_y, is_vnc, &mut tab.rdp_scroll_remainder)
                     {
                         send_mouse_wheel_event(x, y, units);
+                    }
+                    if let Some(units_h) =
+                        remote_wheel_units(scroll_x, is_vnc, &mut tab.rdp_hscroll_remainder)
+                    {
+                        send_mouse_horizontal_wheel_event(x, y, units_h);
                     }
                 }
             }
@@ -2101,9 +2235,6 @@ impl DesktopApp {
         response.request_focus();
 
         let modifiers = ui.input(|i| i.modifiers);
-        let native_super = self.system_input_capture.super_pressed();
-        self.sync_modifiers(modifiers, native_super);
-
         let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
         for event in events {
             let transitions = self.tab_mut().keyboard_state.transitions(&event);
@@ -2119,8 +2250,16 @@ impl DesktopApp {
                     }
                 }
 
-                if let Some((scancode, extended)) = egui_key_to_scancode(transition.key) {
-                    let ext = extended || is_extended_scancode(scancode);
+                // Map Ctrl+Alt+End to remote Ctrl+Alt+Delete to safely send Ctrl+Alt+Del without locking host OS
+                let (scancode, ext) = if modifiers.ctrl && modifiers.alt && transition.key == Key::End {
+                    (0x53, true)
+                } else if let Some((code, ext)) = egui_key_to_scancode(transition.key) {
+                    (code, ext || is_extended_scancode(code))
+                } else {
+                    (0, false)
+                };
+
+                if scancode != 0 {
                     send_scancode_event(scancode, ext, if transition.pressed { 1 } else { 0 });
                 } else if transition.key == Key::Backspace {
                     send_key_event(8, if transition.pressed { 1 } else { 0 });
@@ -2370,6 +2509,12 @@ fn apply_desktop_style(ctx: &egui::Context) {
     style.spacing.menu_margin = egui::Margin::same(6);
     style.spacing.window_margin = egui::Margin::same(10);
 
+    // Set double-click options optimal for both mouse and touchpad taps (350ms delay, 25.0px tolerance)
+    ctx.options_mut(|o| {
+        o.input_options.max_double_click_delay = 0.35;
+        o.input_options.max_click_dist = 25.0;
+    });
+
     // Compact, readable desktop density
     if let Some(font_id) = style
         .text_styles
@@ -2435,10 +2580,6 @@ impl eframe::App for DesktopApp {
                     ui.separator();
                     ui.add_space(2.0);
                     self.ui_toolbar(ui, ctx);
-                    ui.add_space(2.0);
-                    ui.separator();
-                    ui.add_space(2.0);
-                    self.ui_tab_bar(ui, ctx);
                 });
 
             // ── Status bar ──────────────────────────────────────────────────

@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     connect_session, disconnect_session, init_runtime, send_key_event, send_mouse_event,
-    send_mouse_wheel_event, send_scancode_event, SessionCallback,
+    send_mouse_horizontal_wheel_event, send_mouse_wheel_event, send_scancode_event, SessionCallback,
 };
 
 struct JniCallback {
@@ -149,6 +149,17 @@ pub extern "system" fn Java_com_rustai_rdp_RdpClient_sendMouseWheelEvent(
     units: jint,
 ) {
     send_mouse_wheel_event(x, y, units);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rustai_rdp_RdpClient_sendMouseHorizontalWheelEvent(
+    _env: JNIEnv,
+    _class: JClass,
+    x: jint,
+    y: jint,
+    units: jint,
+) {
+    send_mouse_horizontal_wheel_event(x, y, units);
 }
 
 #[no_mangle]

@@ -12,8 +12,8 @@ android {
         applicationId = "com.rustai.rdp"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.0.3"
+        versionCode = 4
+        versionName = "1.0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -119,8 +119,18 @@ tasks.register<Exec>("buildRust") {
         
         val ndkHome = "/home/dev/Android/android-sdk/ndk/25.2.9519653"
         
+        val arm64So = project.file("../../target/aarch64-linux-android/$targetDirName/librust_rdp.so")
+        val x86_64So = project.file("../../target/x86_64-linux-android/$targetDirName/librust_rdp.so")
+        
+        if (!arm64So.exists()) {
+            throw GradleException("Built arm64 librust_rdp.so not found at ${arm64So.absolutePath}")
+        }
+        if (!x86_64So.exists()) {
+            throw GradleException("Built x86_64 librust_rdp.so not found at ${x86_64So.absolutePath}")
+        }
+
         project.copy {
-            from("../../rust_rdp/target/aarch64-linux-android/$targetDirName/librust_rdp.so")
+            from(arm64So)
             into(project.file("src/main/jniLibs/arm64-v8a"))
         }
         project.copy {
@@ -129,7 +139,7 @@ tasks.register<Exec>("buildRust") {
         }
         
         project.copy {
-            from("../../rust_rdp/target/x86_64-linux-android/$targetDirName/librust_rdp.so")
+            from(x86_64So)
             into(project.file("src/main/jniLibs/x86_64"))
         }
         project.copy {

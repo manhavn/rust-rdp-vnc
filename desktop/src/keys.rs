@@ -28,14 +28,10 @@ impl RemoteKeyboardState {
             egui::Event::Key {
                 key,
                 pressed,
-                repeat,
+                repeat: _,
                 modifiers,
                 ..
             } => {
-                if *repeat {
-                    return Vec::new();
-                }
-
                 let transition = KeyTransition {
                     key: *key,
                     pressed: *pressed,
@@ -185,7 +181,7 @@ pub fn egui_key_to_scancode(key: Key) -> Option<(i32, bool)> {
 pub fn is_extended_scancode(scancode: i32) -> bool {
     matches!(
         scancode,
-        0x4B | 0x48 | 0x4D | 0x50 | 0x47 | 0x4F | 0x49 | 0x51 | 0x52 | 0x53
+        0x4B | 0x48 | 0x4D | 0x50 | 0x47 | 0x4F | 0x49 | 0x51 | 0x52 | 0x53 | 0x37 | 0x5D
     )
 }
 
@@ -290,5 +286,23 @@ mod tests {
         assert_eq!(egui_key_to_scancode(Key::Colon), Some((0x27, false)));
         assert_eq!(egui_key_to_scancode(Key::Pipe), Some((0x2B, false)));
         assert_eq!(egui_key_to_scancode(Key::Questionmark), Some((0x35, false)));
+    }
+
+    #[test]
+    fn standard_letters_are_not_extended_scancodes() {
+        let test_letters = [
+            Key::Q, Key::W, Key::E, Key::R, Key::T, Key::Y, Key::U, Key::I, Key::O, Key::P,
+            Key::A, Key::S, Key::D, Key::F, Key::G, Key::H, Key::J, Key::K, Key::L,
+            Key::Z, Key::X, Key::C, Key::V, Key::B, Key::N, Key::M,
+        ];
+        for letter in test_letters {
+            if let Some((scancode, _)) = egui_key_to_scancode(letter) {
+                assert!(
+                    !is_extended_scancode(scancode),
+                    "Letter {:?} with scancode 0x{:02X} must not be marked as extended scancode",
+                    letter, scancode
+                );
+            }
+        }
     }
 }

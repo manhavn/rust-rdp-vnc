@@ -3,6 +3,7 @@ package com.rustai.rdp
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -34,6 +35,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalConfiguration
+import android.content.res.Configuration
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.key.*
@@ -1082,7 +1086,8 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var lastMouseY by remember { mutableStateOf(0) }
     var cursorX by remember { mutableStateOf(viewModel.screenWidth / 2f) }
     var cursorY by remember { mutableStateOf(viewModel.screenHeight / 2f) }
-    var pendingWheelDelta by remember { mutableStateOf(0f) }
+    var pendingWheelDeltaY by remember { mutableStateOf(0f) }
+    var pendingWheelDeltaX by remember { mutableStateOf(0f) }
     var isMouseHeld by remember { mutableStateOf(false) }
     var isToolbarVisible by remember { mutableStateOf(true) }
     var dotOffsetX by remember { mutableStateOf(0f) }
@@ -1183,6 +1188,12 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
         }
     }
 
+    val isKeyboardOpened = isAnyKeyboardActive || isImeVisible
+    val density = LocalDensity.current
+    val toolbarHeightPx = with(density) { 48.dp.toPx() }
+    val configuration = LocalConfiguration.current
+    val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1270,9 +1281,9 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             val drawWidth = viewModel.screenWidth * fitScale
                             val drawHeight = viewModel.screenHeight * fitScale
                             val drawLeft = (size.width - drawWidth) / 2f
-                            val drawTop = (size.height - drawHeight) / 2f
+                            val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (size.height - drawHeight) / 2f
                             val pivotX = size.width / 2f
-                            val pivotY = size.height / 2f
+                            val pivotY = if (isPortrait && isKeyboardOpened) drawTop else size.height / 2f
                             val cursorCanvasX = drawLeft + (cursorX / viewModel.screenWidth.toFloat()) * drawWidth
                             val cursorCanvasY = drawTop + (cursorY / viewModel.screenHeight.toFloat()) * drawHeight
                             val cursorScreenX = (cursorCanvasX - pivotX) * scale + pivotX + offset.x
@@ -1312,12 +1323,19 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             followCursor()
                             },
                             onScroll = { pan ->
-                                pendingWheelDelta += pan.y
+                                pendingWheelDeltaY += pan.y
                                 val wheelStep = 6f
-                                while (abs(pendingWheelDelta) >= wheelStep) {
-                                    val direction = if (pendingWheelDelta > 0f) 1 else -1
-                                    pendingWheelDelta -= direction * wheelStep
+                                while (abs(pendingWheelDeltaY) >= wheelStep) {
+                                    val direction = if (pendingWheelDeltaY > 0f) 1 else -1
+                                    pendingWheelDeltaY -= direction * wheelStep
                                     RdpClient.sendMouseWheelEvent(cursorX.roundToInt(), cursorY.roundToInt(), direction * 120)
+                                }
+
+                                pendingWheelDeltaX += pan.x
+                                while (abs(pendingWheelDeltaX) >= wheelStep) {
+                                    val direction = if (pendingWheelDeltaX > 0f) 1 else -1
+                                    pendingWheelDeltaX -= direction * wheelStep
+                                    RdpClient.sendMouseHorizontalWheelEvent(cursorX.roundToInt(), cursorY.roundToInt(), direction * 120)
                                 }
                             },
                             onTwoFingerTap = {
@@ -1332,9 +1350,9 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             val drawWidth = viewModel.screenWidth * fitScale
                             val drawHeight = viewModel.screenHeight * fitScale
                             val drawLeft = (size.width - drawWidth) / 2f
-                            val drawTop = (size.height - drawHeight) / 2f
+                            val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (size.height - drawHeight) / 2f
                             val pivotX = size.width / 2f
-                            val pivotY = size.height / 2f
+                            val pivotY = if (isPortrait && isKeyboardOpened) drawTop else size.height / 2f
                             val cursorCanvasX = drawLeft + (cursorX / viewModel.screenWidth.toFloat()) * drawWidth
                             val cursorCanvasY = drawTop + (cursorY / viewModel.screenHeight.toFloat()) * drawHeight
                             val cursorScreenX = (cursorCanvasX - pivotX) * scale + pivotX + offset.x
@@ -1361,10 +1379,10 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             val drawWidth = viewModel.screenWidth * fitScale
                             val drawHeight = viewModel.screenHeight * fitScale
                             val drawLeft = (sizeWidth - drawWidth) / 2f
-                            val drawTop = (sizeHeight - drawHeight) / 2f
+                            val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (sizeHeight - drawHeight) / 2f
 
                             val pivotX = sizeWidth / 2f
-                            val pivotY = sizeHeight / 2f
+                            val pivotY = if (isPortrait && isKeyboardOpened) drawTop else sizeHeight / 2f
 
                             val translatedX = tapOffset.x - offset.x
                             val translatedY = tapOffset.y - offset.y
@@ -1458,9 +1476,9 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             val drawWidth = viewModel.screenWidth * fitScale
                             val drawHeight = viewModel.screenHeight * fitScale
                             val drawLeft = (size.width - drawWidth) / 2f
-                            val drawTop = (size.height - drawHeight) / 2f
+                            val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (size.height - drawHeight) / 2f
                             val pivotX = size.width / 2f
-                            val pivotY = size.height / 2f
+                            val pivotY = if (isPortrait && isKeyboardOpened) drawTop else size.height / 2f
                             val cursorCanvasX = drawLeft + (cursorX / viewModel.screenWidth.toFloat()) * drawWidth
                             val cursorCanvasY = drawTop + (cursorY / viewModel.screenHeight.toFloat()) * drawHeight
                             val cursorScreenX = (cursorCanvasX - pivotX) * scale + pivotX + offset.x
@@ -1487,10 +1505,10 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             val drawWidth = viewModel.screenWidth * fitScale
                             val drawHeight = viewModel.screenHeight * fitScale
                             val drawLeft = (sizeWidth - drawWidth) / 2f
-                            val drawTop = (sizeHeight - drawHeight) / 2f
+                            val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (sizeHeight - drawHeight) / 2f
 
                             val pivotX = sizeWidth / 2f
-                            val pivotY = sizeHeight / 2f
+                            val pivotY = if (isPortrait && isKeyboardOpened) drawTop else sizeHeight / 2f
 
                             val translatedX = tapOffset.x - offset.x
                             val translatedY = tapOffset.y - offset.y
@@ -1568,11 +1586,12 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                     val drawWidth = viewModel.screenWidth * fitScale
                     val drawHeight = viewModel.screenHeight * fitScale
                     val drawLeft = (size.width - drawWidth) / 2f
-                    val drawTop = (size.height - drawHeight) / 2f
+                    val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (size.height - drawHeight) / 2f
+                    val pivotY = if (isPortrait && isKeyboardOpened) drawTop else size.height / 2f
 
                     withTransform({
                         translate(offset.x, offset.y)
-                        scale(scale, scale, pivot = Offset(size.width / 2f, size.height / 2f))
+                        scale(scale, scale, pivot = Offset(size.width / 2f, pivotY))
                     }) {
                         drawImage(
                             image = bmp.asImageBitmap(),

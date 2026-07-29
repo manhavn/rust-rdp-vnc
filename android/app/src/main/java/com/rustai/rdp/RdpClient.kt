@@ -27,10 +27,10 @@ object RdpClient {
     }
 
     // Initialize Rust backend logging and runtime
-    external fun initJni()
+    @JvmStatic external fun initJni()
 
     // Connect to RDP Server
-    external fun connect(
+    @JvmStatic external fun connect(
         host: String,
         port: Int,
         username: String,
@@ -43,21 +43,24 @@ object RdpClient {
     )
 
     // Disconnect from RDP Server
-    external fun disconnect()
+    @JvmStatic external fun disconnect()
 
     // Send mouse input events
     // action: 0 = move, 1 = left click down, 2 = left click up, 3 = right click down, 4 = right click up
-    external fun sendMouseEvent(x: Int, y: Int, action: Int)
+    @JvmStatic external fun sendMouseEvent(x: Int, y: Int, action: Int)
 
     // Send vertical mouse wheel input. Positive units scroll up, negative units scroll down.
-    external fun sendMouseWheelEvent(x: Int, y: Int, units: Int)
+    @JvmStatic external fun sendMouseWheelEvent(x: Int, y: Int, units: Int)
+
+    // Send horizontal mouse wheel input. Positive units scroll right, negative units scroll left.
+    @JvmStatic external fun sendMouseHorizontalWheelEvent(x: Int, y: Int, units: Int)
 
     // Send keyboard input events
     // pressed: 1 = pressed, 0 = released
-    external fun sendKeyEvent(keycode: Int, pressed: Int)
+    @JvmStatic external fun sendKeyEvent(keycode: Int, pressed: Int)
 
     // Send raw keyboard scan code events
     // pressed: 1 = pressed, 0 = released
     // isExtended: true if it's an extended key (like arrows, etc.)
-    external fun sendScancodeEvent(scancode: Int, isExtended: Boolean, pressed: Int)
+    @JvmStatic external fun sendScancodeEvent(scancode: Int, isExtended: Boolean, pressed: Int)
 }
