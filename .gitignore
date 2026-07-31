@@ -1,6 +1,8 @@
 # Rust build artifacts
 /target
 /rust_rdp/target
+/dist/
+*.o
 **/*.rs.bk
 
 # Android build artifacts

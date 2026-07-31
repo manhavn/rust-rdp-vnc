@@ -1,7 +1,11 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod input_capture;
 mod keys;
 
-use eframe::egui::{self, Align, Color32, ColorImage, Key, Layout, RichText, TextureHandle, TextureOptions, Vec2};
+use eframe::egui::{
+    self, Align, Color32, ColorImage, Key, Layout, RichText, TextureHandle, TextureOptions, Vec2,
+};
 use input_capture::SystemInputCapture;
 use parking_lot::Mutex;
 use rust_rdp::{
@@ -14,7 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keys::{egui_key_to_scancode, is_extended_scancode, RemoteKeyboardState};
+use keys::{char_to_scancode, egui_key_to_scancode, is_extended_scancode, RemoteKeyboardState};
 
 // ── Desktop chrome palette (neutral, not mobile-neon) ───────────────────────
 mod theme {
@@ -101,18 +105,21 @@ impl FrameBuffer {
     fn to_color_image(&self) -> ColorImage {
         let w = self.width as usize;
         let h = self.height as usize;
-        let mut rgba = vec![0u8; w * h * 4];
-        for (i, px) in self.pixels.iter().take(w * h).enumerate() {
+        let total_pixels = w * h;
+        let mut rgba = vec![0u8; total_pixels * 4];
+
+        for (px, out) in self
+            .pixels
+            .iter()
+            .take(total_pixels)
+            .zip(rgba.chunks_exact_mut(4))
+        {
             let v = *px as u32;
             let a = ((v >> 24) & 0xFF) as u8;
-            let r = ((v >> 16) & 0xFF) as u8;
-            let g = ((v >> 8) & 0xFF) as u8;
-            let b = (v & 0xFF) as u8;
-            let o = i * 4;
-            rgba[o] = r;
-            rgba[o + 1] = g;
-            rgba[o + 2] = b;
-            rgba[o + 3] = if a == 0 { 255 } else { a };
+            out[0] = ((v >> 16) & 0xFF) as u8; // R
+            out[1] = ((v >> 8) & 0xFF) as u8;  // G
+            out[2] = (v & 0xFF) as u8;         // B
+            out[3] = if a == 0 { 255 } else { a };
         }
         ColorImage::from_rgba_unmultiplied([w, h], &rgba)
     }
@@ -224,7 +231,9 @@ impl Prefs {
                     "host" => p.host = v.to_string(),
                     "port" => p.port = v.to_string(),
                     "username" => p.username = v.to_string(),
-                    "password" => p.password = v.trim_matches(|c| c == '\r' || c == '\n').to_string(),
+                    "password" => {
+                        p.password = v.trim_matches(|c| c == '\r' || c == '\n').to_string()
+                    }
                     "domain" => p.domain = v.to_string(),
                     "mode" => p.mode = v.to_string(),
                     "width" => p.width = v.to_string(),
@@ -490,6 +499,7 @@ struct ConnectionTab {
     tab_id: u64,
     prefs: Prefs,
     shared: Arc<SharedUi>,
+    show_password: bool,
     /// Backend session while connecting/connected (also kept after Failed until reconnect).
     backend_session_id: Option<u64>,
     texture: Option<TextureHandle>,
@@ -519,6 +529,7 @@ impl ConnectionTab {
             tab_id,
             prefs,
             shared: SharedUi::new(),
+            show_password: false,
             backend_session_id: None,
             texture: None,
             last_frame_gen: 0,
@@ -1042,7 +1053,12 @@ impl DesktopApp {
             let tab = self.tab();
             let default_port = if tab.prefs.mode == "VNC" { 5900 } else { 3389 };
             let port = tab.prefs.port.parse::<i32>().unwrap_or(default_port);
-            let width = tab.prefs.width.parse::<i32>().unwrap_or(1920).clamp(640, 7680);
+            let width = tab
+                .prefs
+                .width
+                .parse::<i32>()
+                .unwrap_or(1920)
+                .clamp(640, 7680);
             let height = tab
                 .prefs
                 .height
@@ -1053,7 +1069,10 @@ impl DesktopApp {
                 tab.prefs.host.trim().to_string(),
                 port,
                 tab.prefs.username.trim().to_string(),
-                tab.prefs.password.trim_matches(|c| c == '\r' || c == '\n').to_string(),
+                tab.prefs
+                    .password
+                    .trim_matches(|c| c == '\r' || c == '\n')
+                    .to_string(),
                 tab.prefs.domain.trim().to_string(),
                 tab.prefs.mode.trim().to_string(),
                 width,
@@ -1070,9 +1089,7 @@ impl DesktopApp {
         *shared.state.lock() = ConnectionState::Connecting;
         *shared.status.lock() = format!("Connecting to {endpoint} via {mode}…");
 
-        let cb: Arc<dyn SessionCallback> = Arc::new(UiCallback {
-            ui: shared.clone(),
-        });
+        let cb: Arc<dyn SessionCallback> = Arc::new(UiCallback { ui: shared.clone() });
 
         let session_id = connect_session(
             host, port, username, password, domain, width, height, mode, cb,
@@ -1169,7 +1186,10 @@ impl DesktopApp {
                     ui.close_menu();
                 }
                 if ui
-                    .add_enabled(self.can_connect(), egui::Button::new("Connect…\tCtrl+Return"))
+                    .add_enabled(
+                        self.can_connect(),
+                        egui::Button::new("Connect…\tCtrl+Return"),
+                    )
                     .clicked()
                 {
                     self.start_connect();
@@ -1366,7 +1386,11 @@ impl DesktopApp {
 
                 ui.separator();
 
-                if ui.button("1:1").on_hover_text("Actual size (100%)").clicked() {
+                if ui
+                    .button("1:1")
+                    .on_hover_text("Actual size (100%)")
+                    .clicked()
+                {
                     self.fit_mode = FitMode::Actual;
                     self.zoom = 1.0;
                 }
@@ -1378,7 +1402,7 @@ impl DesktopApp {
                 if ui.button("−").on_hover_text("Zoom out").clicked() {
                     self.zoom = (self.zoom / 1.1).max(0.25);
                 }
-                    ui.label(
+                ui.label(
                     RichText::new(format!("{:.0}%", self.zoom * 100.0))
                         .monospace()
                         .color(theme::TEXT_DIM),
@@ -1473,10 +1497,11 @@ impl DesktopApp {
                                 ui.horizontal_centered(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
                                     // Status dot
-                                    let (dot, _) = ui
-                                        .allocate_exact_size(Vec2::splat(7.0), egui::Sense::hover());
-                                    ui.painter()
-                                        .circle_filled(dot.center(), 3.0, state.color());
+                                    let (dot, _) = ui.allocate_exact_size(
+                                        Vec2::splat(7.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    ui.painter().circle_filled(dot.center(), 3.0, state.color());
 
                                     let label = RichText::new(title).small();
                                     if ui
@@ -1569,10 +1594,7 @@ impl DesktopApp {
             .open(&mut open)
             .show(ctx, |ui| {
                 ui.set_min_width(340.0);
-                ui.label(
-                    RichText::new(format!("“{title}” is {state_label}."))
-                        .strong(),
-                );
+                ui.label(RichText::new(format!("“{title}” is {state_label}.")).strong());
                 ui.add_space(6.0);
                 ui.label(
                     RichText::new("Closing this tab will disconnect the remote session.")
@@ -1691,12 +1713,24 @@ impl DesktopApp {
                     ui.end_row();
 
                     ui.label(RichText::new("Password").color(theme::TEXT_DIM));
-                    ui.add_enabled(
-                        !busy,
-                        egui::TextEdit::singleline(&mut tab.prefs.password)
-                            .password(true)
-                            .desired_width(f32::INFINITY),
-                    );
+                    ui.horizontal(|ui| {
+                        let available_w = ui.available_width() - 36.0;
+                        ui.add_enabled(
+                            !busy,
+                            egui::TextEdit::singleline(&mut tab.prefs.password)
+                                .password(!tab.show_password)
+                                .desired_width(available_w.max(60.0)),
+                        );
+                        let icon = if tab.show_password { "🙈" } else { "👁" };
+                        let tooltip = if tab.show_password { "Hide password" } else { "Show password" };
+                        if ui
+                            .add_enabled(!busy, egui::Button::new(icon))
+                            .on_hover_text(tooltip)
+                            .clicked()
+                        {
+                            tab.show_password = !tab.show_password;
+                        }
+                    });
                     ui.end_row();
                 });
 
@@ -1781,11 +1815,10 @@ impl DesktopApp {
                     {
                         self.open_connection();
                     }
-                    let btn = egui::Button::new(
-                        RichText::new("Connect").strong().color(Color32::WHITE),
-                    )
-                    .fill(theme::ACCENT)
-                    .min_size(Vec2::new(half, 32.0));
+                    let btn =
+                        egui::Button::new(RichText::new("Connect").strong().color(Color32::WHITE))
+                            .fill(theme::ACCENT)
+                            .min_size(Vec2::new(half, 32.0));
                     if ui.add_enabled(can_connect, btn).clicked() {
                         self.start_connect();
                     }
@@ -1798,8 +1831,7 @@ impl DesktopApp {
                 });
                 if ui
                     .add(
-                        egui::Button::new("Cancel")
-                            .min_size(Vec2::new(ui.available_width(), 28.0)),
+                        egui::Button::new("Cancel").min_size(Vec2::new(ui.available_width(), 28.0)),
                     )
                     .clicked()
                 {
@@ -1832,7 +1864,11 @@ impl DesktopApp {
                 .corner_radius(4.0)
                 .inner_margin(8.0)
                 .show(ui, |ui| {
-                    ui.label(RichText::new("Connection failed").color(theme::DANGER).strong());
+                    ui.label(
+                        RichText::new("Connection failed")
+                            .color(theme::DANGER)
+                            .strong(),
+                    );
                     ui.label(RichText::new(msg).small().color(theme::TEXT));
                 });
         }
@@ -1929,11 +1965,7 @@ impl DesktopApp {
                         ui.spinner();
                         ui.add_space(12.0);
                         ui.label(RichText::new("Establishing session…").size(15.0));
-                        ui.label(
-                            RichText::new(status)
-                                .color(theme::TEXT_DIM)
-                                .small(),
-                        );
+                        ui.label(RichText::new(status).color(theme::TEXT_DIM).small());
                     });
                 });
             }
@@ -2070,9 +2102,7 @@ impl DesktopApp {
         let pointer = response
             .hover_pos()
             .or_else(|| response.interact_pointer_pos())
-            .or_else(|| {
-                ui.input(|i| i.pointer.latest_pos().filter(|p| rect.contains(*p)))
-            });
+            .or_else(|| ui.input(|i| i.pointer.latest_pos().filter(|p| rect.contains(*p))));
 
         let pointer_over_exit = view_fullscreen
             && pointer
@@ -2150,7 +2180,13 @@ impl DesktopApp {
                         tab.left_down_dragged = false;
                     }
                 }
-                if !buttons.0 && !buttons.1 && tab.left_down && !ui.ctx().input(|i| i.pointer.button_down(egui::PointerButton::Primary)) {
+                if !buttons.0
+                    && !buttons.1
+                    && tab.left_down
+                    && !ui
+                        .ctx()
+                        .input(|i| i.pointer.button_down(egui::PointerButton::Primary))
+                {
                     send_mouse_event(x, y, 2);
                     tab.left_down = false;
                     tab.left_down_pos = None;
@@ -2169,7 +2205,13 @@ impl DesktopApp {
                         tab.right_down = false;
                     }
                 }
-                if !buttons.2 && !buttons.3 && tab.right_down && !ui.ctx().input(|i| i.pointer.button_down(egui::PointerButton::Secondary)) {
+                if !buttons.2
+                    && !buttons.3
+                    && tab.right_down
+                    && !ui
+                        .ctx()
+                        .input(|i| i.pointer.button_down(egui::PointerButton::Secondary))
+                {
                     send_mouse_event(x, y, 4);
                     tab.right_down = false;
                 }
@@ -2236,8 +2278,10 @@ impl DesktopApp {
 
         let modifiers = ui.input(|i| i.modifiers);
         let events: Vec<egui::Event> = ui.input(|i| i.events.clone());
-        for event in events {
-            let transitions = self.tab_mut().keyboard_state.transitions(&event);
+        let mut processed_scancodes = Vec::new();
+
+        for event in &events {
+            let transitions = self.tab_mut().keyboard_state.transitions(event);
             for transition in transitions {
                 {
                     let keys_down = &mut self.tab_mut().remote_keys_down;
@@ -2250,21 +2294,48 @@ impl DesktopApp {
                     }
                 }
 
+                let effective_key = transition
+                    .physical_key
+                    .filter(|k| egui_key_to_scancode(*k).is_some())
+                    .unwrap_or(transition.key);
+
                 // Map Ctrl+Alt+End to remote Ctrl+Alt+Delete to safely send Ctrl+Alt+Del without locking host OS
-                let (scancode, ext) = if modifiers.ctrl && modifiers.alt && transition.key == Key::End {
-                    (0x53, true)
-                } else if let Some((code, ext)) = egui_key_to_scancode(transition.key) {
-                    (code, ext || is_extended_scancode(code))
-                } else {
-                    (0, false)
-                };
+                let (scancode, ext) =
+                    if modifiers.ctrl && modifiers.alt && transition.key == Key::End {
+                        (0x53, true)
+                    } else if let Some((code, ext)) = egui_key_to_scancode(effective_key) {
+                        (code, ext || is_extended_scancode(code))
+                    } else {
+                        (0, false)
+                    };
 
                 if scancode != 0 {
                     send_scancode_event(scancode, ext, if transition.pressed { 1 } else { 0 });
+                    if transition.pressed {
+                        processed_scancodes.push(scancode);
+                    }
                 } else if transition.key == Key::Backspace {
                     send_key_event(8, if transition.pressed { 1 } else { 0 });
                 } else if transition.key == Key::Enter {
                     send_key_event(13, if transition.pressed { 1 } else { 0 });
+                }
+            }
+
+            // Fallback for character text events (e.g. !, {, }, @, #, $, %, ^, &, *, etc.) if not caught by Key events
+            if let egui::Event::Text(ref text) = event {
+                for ch in text.chars() {
+                    if let Some((scancode, ext, needs_shift)) = char_to_scancode(ch) {
+                        if !processed_scancodes.contains(&scancode) {
+                            if needs_shift && !modifiers.shift {
+                                send_scancode_event(0x2A, false, 1);
+                            }
+                            send_scancode_event(scancode, ext, 1);
+                            send_scancode_event(scancode, ext, 0);
+                            if needs_shift && !modifiers.shift {
+                                send_scancode_event(0x2A, false, 0);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2516,10 +2587,7 @@ fn apply_desktop_style(ctx: &egui::Context) {
     });
 
     // Compact, readable desktop density
-    if let Some(font_id) = style
-        .text_styles
-        .get_mut(&egui::TextStyle::Body)
-    {
+    if let Some(font_id) = style.text_styles.get_mut(&egui::TextStyle::Body) {
         font_id.size = 13.0;
     }
     if let Some(font_id) = style.text_styles.get_mut(&egui::TextStyle::Button) {
@@ -2534,6 +2602,10 @@ fn apply_desktop_style(ctx: &egui::Context) {
 
 impl eframe::App for DesktopApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.input_mut(|i| {
+            ensure_text_events_for_keyboard_input(&mut i.events);
+        });
+
         // Repaint while any tab has an active session (background tabs still receive frames).
         let any_live = self.tabs.iter().any(|t| {
             matches!(
@@ -2679,27 +2751,239 @@ impl eframe::App for DesktopApp {
     }
 }
 
+fn load_app_icon() -> egui::IconData {
+    let bytes = include_bytes!("../assets/icon-512.png");
+    if let Ok(img) = image::load_from_memory_with_format(bytes, image::ImageFormat::Png) {
+        let rgba = img.to_rgba8();
+        let (width, height) = rgba.dimensions();
+        egui::IconData {
+            rgba: rgba.into_raw(),
+            width,
+            height,
+        }
+    } else {
+        egui::IconData::default()
+    }
+}
+
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
+            .with_app_id("io.github.manhavn.rust-rdp-vnc")
+            .with_icon(load_app_icon())
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([960.0, 600.0])
             .with_title("Rust RDP VNC"),
+        hardware_acceleration: eframe::HardwareAcceleration::Preferred,
+        renderer: eframe::Renderer::Glow,
+        vsync: true,
+        multisampling: 4,
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Rust RDP VNC",
-        options,
+        options.clone(),
         Box::new(|cc| Ok(Box::new(DesktopApp::new(cc)))),
-    )
+    );
+
+    #[cfg(target_os = "linux")]
+    if let Err(ref err) = result {
+        let err_str = format!("{err:?}");
+        if err_str.contains("WaylandError")
+            || err_str.contains("NoWaylandLib")
+            || err_str.contains("WinitEventLoop")
+        {
+            log::warn!("Wayland event loop initialization failed ({err_str}), falling back to X11 backend...");
+            std::env::set_var("WINIT_UNIX_BACKEND", "x11");
+            return eframe::run_native(
+                "Rust RDP VNC",
+                options,
+                Box::new(|cc| Ok(Box::new(DesktopApp::new(cc)))),
+            );
+        }
+    }
+
+    result
+}
+
+/// Synthesizes missing `egui::Event::Text` for printable keyboard inputs (such as
+/// letters, numbers, shift symbols, punctuation, and space) when Linux backend/winit fails to
+/// emit character text for key presses.
+fn ensure_text_events_for_keyboard_input(events: &mut Vec<egui::Event>) {
+    let mut synthetic_text = Vec::new();
+    for event in events.iter() {
+        if let egui::Event::Key {
+            key,
+            pressed: true,
+            modifiers,
+            ..
+        } = event
+        {
+            if !modifiers.ctrl && !modifiers.alt && !modifiers.command && !modifiers.mac_cmd {
+                let text_symbol = match key {
+                    // Letters
+                    Key::A => Some(if modifiers.shift { "A" } else { "a" }),
+                    Key::B => Some(if modifiers.shift { "B" } else { "b" }),
+                    Key::C => Some(if modifiers.shift { "C" } else { "c" }),
+                    Key::D => Some(if modifiers.shift { "D" } else { "d" }),
+                    Key::E => Some(if modifiers.shift { "E" } else { "e" }),
+                    Key::F => Some(if modifiers.shift { "F" } else { "f" }),
+                    Key::G => Some(if modifiers.shift { "G" } else { "g" }),
+                    Key::H => Some(if modifiers.shift { "H" } else { "h" }),
+                    Key::I => Some(if modifiers.shift { "I" } else { "i" }),
+                    Key::J => Some(if modifiers.shift { "J" } else { "j" }),
+                    Key::K => Some(if modifiers.shift { "K" } else { "k" }),
+                    Key::L => Some(if modifiers.shift { "L" } else { "l" }),
+                    Key::M => Some(if modifiers.shift { "M" } else { "m" }),
+                    Key::N => Some(if modifiers.shift { "N" } else { "n" }),
+                    Key::O => Some(if modifiers.shift { "O" } else { "o" }),
+                    Key::P => Some(if modifiers.shift { "P" } else { "p" }),
+                    Key::Q => Some(if modifiers.shift { "Q" } else { "q" }),
+                    Key::R => Some(if modifiers.shift { "R" } else { "r" }),
+                    Key::S => Some(if modifiers.shift { "S" } else { "s" }),
+                    Key::T => Some(if modifiers.shift { "T" } else { "t" }),
+                    Key::U => Some(if modifiers.shift { "U" } else { "u" }),
+                    Key::V => Some(if modifiers.shift { "V" } else { "v" }),
+                    Key::W => Some(if modifiers.shift { "W" } else { "w" }),
+                    Key::X => Some(if modifiers.shift { "X" } else { "x" }),
+                    Key::Y => Some(if modifiers.shift { "Y" } else { "y" }),
+                    Key::Z => Some(if modifiers.shift { "Z" } else { "z" }),
+
+                    // Numbers & Top row shift symbols
+                    Key::Num1 => Some(if modifiers.shift { "!" } else { "1" }),
+                    Key::Num2 => Some(if modifiers.shift { "@" } else { "2" }),
+                    Key::Num3 => Some(if modifiers.shift { "#" } else { "3" }),
+                    Key::Num4 => Some(if modifiers.shift { "$" } else { "4" }),
+                    Key::Num5 => Some(if modifiers.shift { "%" } else { "5" }),
+                    Key::Num6 => Some(if modifiers.shift { "^" } else { "6" }),
+                    Key::Num7 => Some(if modifiers.shift { "&" } else { "7" }),
+                    Key::Num8 => Some(if modifiers.shift { "*" } else { "8" }),
+                    Key::Num9 => Some(if modifiers.shift { "(" } else { "9" }),
+                    Key::Num0 => Some(if modifiers.shift { ")" } else { "0" }),
+
+                    // Punctuation & Symbols
+                    Key::Period => Some(if modifiers.shift { ">" } else { "." }),
+                    Key::Comma => Some(if modifiers.shift { "<" } else { "," }),
+                    Key::Minus => Some(if modifiers.shift { "_" } else { "-" }),
+                    Key::Equals => Some(if modifiers.shift { "+" } else { "=" }),
+                    Key::Plus => Some("+"),
+                    Key::Slash => Some(if modifiers.shift { "?" } else { "/" }),
+                    Key::Questionmark => Some("?"),
+                    Key::Backslash => Some(if modifiers.shift { "|" } else { "\\" }),
+                    Key::Pipe => Some("|"),
+                    Key::Semicolon => Some(if modifiers.shift { ":" } else { ";" }),
+                    Key::Colon => Some(":"),
+                    Key::Quote => Some(if modifiers.shift { "\"" } else { "'" }),
+                    Key::Backtick => Some(if modifiers.shift { "~" } else { "`" }),
+                    Key::OpenBracket => Some(if modifiers.shift { "{" } else { "[" }),
+                    Key::CloseBracket => Some(if modifiers.shift { "}" } else { "]" }),
+                    Key::Space => Some(" "),
+                    _ => None,
+                };
+
+                if let Some(symbol) = text_symbol {
+                    let already_has_text = events.iter().any(|e| match e {
+                        egui::Event::Text(t) => t == symbol,
+                        _ => false,
+                    });
+                    if !already_has_text {
+                        synthetic_text.push(egui::Event::Text(symbol.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    events.extend(synthetic_text);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::remote_wheel_units;
+    use super::*;
+
+    #[test]
+    fn synthesizes_missing_text_event_for_period_key() {
+        let mut events = vec![egui::Event::Key {
+            key: Key::Period,
+            physical_key: Some(Key::Period),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }];
+        ensure_text_events_for_keyboard_input(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1], egui::Event::Text(".".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_shift_period_key_as_greater_than() {
+        let mut events = vec![egui::Event::Key {
+            key: Key::Period,
+            physical_key: Some(Key::Period),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        }];
+        ensure_text_events_for_keyboard_input(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1], egui::Event::Text(">".to_string()));
+    }
+
+    #[test]
+    fn does_not_duplicate_existing_text_event_for_period_key() {
+        let mut events = vec![
+            egui::Event::Key {
+                key: Key::Period,
+                physical_key: Some(Key::Period),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Text(".".to_string()),
+        ];
+        ensure_text_events_for_keyboard_input(&mut events);
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn synthesizes_shift_number_two_as_at_symbol() {
+        let mut events = vec![egui::Event::Key {
+            key: Key::Num2,
+            physical_key: Some(Key::Num2),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::SHIFT,
+        }];
+        ensure_text_events_for_keyboard_input(&mut events);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1], egui::Event::Text("@".to_string()));
+    }
+
+    #[test]
+    fn synthesizes_letter_keys_correctly() {
+        let mut events = vec![
+            egui::Event::Key {
+                key: Key::A,
+                physical_key: Some(Key::A),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Key {
+                key: Key::B,
+                physical_key: Some(Key::B),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            },
+        ];
+        ensure_text_events_for_keyboard_input(&mut events);
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[2], egui::Event::Text("a".to_string()));
+        assert_eq!(events[3], egui::Event::Text("B".to_string()));
+    }
 
     #[test]
     fn vnc_wheel_uses_correct_direction_and_faster_speed() {

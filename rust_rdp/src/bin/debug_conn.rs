@@ -1,14 +1,16 @@
-use std::sync::Arc;
-use tokio_rustls::TlsConnector;
-use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
+use std::sync::Arc;
+use tokio_rustls::TlsConnector;
 
-use ironrdp_connector::{ClientConnector, Config, Credentials, DesktopSize, BitmapConfig, ServerName as RdpServerName};
 use ironrdp_async::{connect_begin, connect_finalize, mark_as_upgraded};
-use ironrdp_tokio::TokioFramed;
+use ironrdp_connector::{
+    BitmapConfig, ClientConnector, Config, Credentials, DesktopSize, ServerName as RdpServerName,
+};
 use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler, BitmapUpdate};
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_tokio::TokioFramed;
 
 struct DummyGfxHandler;
 impl GraphicsPipelineHandler for DummyGfxHandler {
@@ -22,13 +24,22 @@ impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= log::Level::Info
             || (metadata.level() <= log::Level::Debug
-                && (metadata.target().starts_with("ironrdp_connector::connection")
-                    || metadata.target().starts_with("ironrdp_connector::connection_activation")
+                && (metadata
+                    .target()
+                    .starts_with("ironrdp_connector::connection")
+                    || metadata
+                        .target()
+                        .starts_with("ironrdp_connector::connection_activation")
                     || metadata.target().starts_with("ironrdp_async::framed")))
     }
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            println!("[{}] [{}]: {}", record.level(), record.target(), record.args());
+            println!(
+                "[{}] [{}]: {}",
+                record.level(),
+                record.target(),
+                record.args()
+            );
         }
     }
     fn flush(&self) {}
@@ -89,8 +100,13 @@ impl ServerCertVerifier for NoVerify {
 struct SimpleNetworkClient;
 
 impl ironrdp_async::NetworkClient for SimpleNetworkClient {
-    async fn send(&mut self, _request: &ironrdp_connector::sspi::generator::NetworkRequest) -> ironrdp_connector::ConnectorResult<Vec<u8>> {
-        Err(ironrdp_connector::general_err!("SSPI network request not supported"))
+    async fn send(
+        &mut self,
+        _request: &ironrdp_connector::sspi::generator::NetworkRequest,
+    ) -> ironrdp_connector::ConnectorResult<Vec<u8>> {
+        Err(ironrdp_connector::general_err!(
+            "SSPI network request not supported"
+        ))
     }
 }
 
@@ -100,7 +116,7 @@ fn read_der_length(der: &[u8], cursor: &mut usize) -> Option<usize> {
     }
     let first = der[*cursor];
     *cursor += 1;
-    
+
     if first < 0x80 {
         Some(first as usize)
     } else {
@@ -119,16 +135,16 @@ fn read_der_length(der: &[u8], cursor: &mut usize) -> Option<usize> {
 
 fn extract_raw_public_key(spki_der: &[u8]) -> Option<Vec<u8>> {
     let mut cursor = 0;
-    
+
     // Read SEQUENCE tag
     if cursor >= spki_der.len() || spki_der[cursor] != 0x30 {
         return None;
     }
     cursor += 1;
-    
+
     // Read SEQUENCE length
     let _seq_len = read_der_length(spki_der, &mut cursor)?;
-    
+
     // Read algorithm (AlgorithmIdentifier SEQUENCE)
     if cursor >= spki_der.len() || spki_der[cursor] != 0x30 {
         return None;
@@ -136,25 +152,25 @@ fn extract_raw_public_key(spki_der: &[u8]) -> Option<Vec<u8>> {
     cursor += 1;
     let alg_len = read_der_length(spki_der, &mut cursor)?;
     cursor += alg_len; // Skip AlgorithmIdentifier
-    
+
     // Read subjectPublicKey BIT STRING (Tag 0x03)
     if cursor >= spki_der.len() || spki_der[cursor] != 0x03 {
         return None;
     }
     cursor += 1;
-    
+
     let bit_str_len = read_der_length(spki_der, &mut cursor)?;
     if cursor + bit_str_len > spki_der.len() {
         return None;
     }
-    
+
     // The BIT STRING value starts with a single byte indicating the number of unused bits (usually 0)
     let unused_bits = spki_der[cursor];
     if unused_bits != 0 {
         return None;
     }
-    
-    Some(spki_der[cursor + 1 .. cursor + bit_str_len].to_vec())
+
+    Some(spki_der[cursor + 1..cursor + bit_str_len].to_vec())
 }
 
 #[tokio::main]
@@ -168,7 +184,10 @@ async fn main() {
         std::process::exit(2);
     };
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
-        eprintln!("Could not read {}: {e}", std::path::Path::new(&path).display());
+        eprintln!(
+            "Could not read {}: {e}",
+            std::path::Path::new(&path).display()
+        );
         std::process::exit(2);
     });
     let mut host_str = String::new();
@@ -247,7 +266,12 @@ async fn main() {
     let mut last_error = String::new();
 
     for (idx, attempt) in attempts.iter().enumerate() {
-        println!("\n=== TRYING ATTEMPT {}/{} ({}) ===", idx + 1, attempts.len(), attempt.desc);
+        println!(
+            "\n=== TRYING ATTEMPT {}/{} ({}) ===",
+            idx + 1,
+            attempts.len(),
+            attempt.desc
+        );
 
         match tokio::net::TcpStream::connect(&addr).await {
             Ok(tcp_stream) => {
@@ -325,16 +349,14 @@ async fn main() {
                 println!("Upgrading connection to TLS...");
                 let (tcp_stream, leftover) = framed.into_inner();
 
-                let tls_config = match rustls::ClientConfig::builder_with_provider(
-                    Arc::new(rustls::crypto::ring::default_provider())
-                )
+                let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+                    rustls::crypto::ring::default_provider(),
+                ))
                 .with_safe_default_protocol_versions()
                 .unwrap()
                 .dangerous()
                 .with_custom_certificate_verifier(Arc::new(NoVerify))
-                .with_no_client_auth() {
-                    config => config,
-                };
+                .with_no_client_auth();
 
                 let server_name = match ServerName::try_from(host_str.clone()) {
                     Ok(sn) => sn.to_owned(),
@@ -360,18 +382,19 @@ async fn main() {
                 let server_public_key = if let Some(cert_der) = certs.first() {
                     match picky::x509::Cert::from_der(cert_der.as_ref()) {
                         Ok(cert) => match cert.public_key().to_der() {
-                            Ok(spki_der) => {
-                                match extract_raw_public_key(&spki_der) {
-                                    Some(raw_key) => {
-                                        println!("Successfully extracted raw public key (len: {})", raw_key.len());
-                                        raw_key
-                                    }
-                                    None => {
-                                        println!("Failed to extract raw public key from SPKI DER, falling back to SPKI DER");
-                                        spki_der
-                                    }
+                            Ok(spki_der) => match extract_raw_public_key(&spki_der) {
+                                Some(raw_key) => {
+                                    println!(
+                                        "Successfully extracted raw public key (len: {})",
+                                        raw_key.len()
+                                    );
+                                    raw_key
                                 }
-                            }
+                                None => {
+                                    println!("Failed to extract raw public key from SPKI DER, falling back to SPKI DER");
+                                    spki_der
+                                }
+                            },
                             Err(e) => {
                                 println!("picky Cert to_der error: {:?}", e);
                                 Vec::new()
@@ -401,7 +424,8 @@ async fn main() {
                     server_public_key,
                     None,
                 )
-                .await {
+                .await
+                {
                     Ok(_res) => {
                         println!("SUCCESS! Connection finalized successfully!");
                         return;

@@ -241,55 +241,37 @@ mod linux {
     fn evdev_to_scancode(evdev_code: u32) -> Option<(i32, bool)> {
         Some(match evdev_code {
             // Special Modifiers
-            29 => (0x1D, false),  // KEY_LEFTCTRL
-            97 => (0x1D, true),   // KEY_RIGHTCTRL
-            56 => (0x38, false),  // KEY_LEFTALT
-            100 => (0x38, true),  // KEY_RIGHTALT
-            42 => (0x2A, false),  // KEY_LEFTSHIFT
-            54 => (0x36, false),  // KEY_RIGHTSHIFT
-            125 => (0x5B, true),  // KEY_LEFTMETA (Left Win)
-            126 => (0x5C, true),  // KEY_RIGHTMETA (Right Win)
+            29 => (0x1D, false), // KEY_LEFTCTRL
+            97 => (0x1D, true),  // KEY_RIGHTCTRL
+            56 => (0x38, false), // KEY_LEFTALT
+            100 => (0x38, true), // KEY_RIGHTALT
+            42 => (0x2A, false), // KEY_LEFTSHIFT
+            54 => (0x36, false), // KEY_RIGHTSHIFT
+            125 => (0x5B, true), // KEY_LEFTMETA (Left Win)
+            126 => (0x5C, true), // KEY_RIGHTMETA (Right Win)
 
             // Lock & Special Keys
-            58 => (0x3A, false),  // KEY_CAPSLOCK
-            69 => (0x45, false),  // KEY_NUMLOCK
-            70 => (0x46, false),  // KEY_SCROLLLOCK
-            99 => (0x37, true),   // KEY_SYSRQ / KEY_PRINT (PrintScreen)
-            119 => (0x45, true),  // KEY_PAUSE
-            127 => (0x5D, true),  // KEY_COMPOSE / KEY_MENU
-            135 => (0x5D, true),  // KEY_MENU / X11
-            139 => (0x5D, true),  // KEY_MENU
+            58 => (0x3A, false), // KEY_CAPSLOCK
+            69 => (0x45, false), // KEY_NUMLOCK
+            70 => (0x46, false), // KEY_SCROLLLOCK
+            99 => (0x37, true),  // KEY_SYSRQ / KEY_PRINT (PrintScreen)
+            119 => (0x45, true), // KEY_PAUSE
+            127 => (0x5D, true), // KEY_COMPOSE / KEY_MENU
+            135 => (0x5D, true), // KEY_MENU / X11
+            139 => (0x5D, true), // KEY_MENU
 
             // Volume & Media & Brightness Keys
-            113 => (0x20, true),  // KEY_MUTE
-            114 => (0x2E, true),  // KEY_VOLUMEDOWN
-            115 => (0x30, true),  // KEY_VOLUMEUP
-            163 => (0x19, true),  // KEY_NEXTSONG
-            164 => (0x22, true),  // KEY_PLAYPAUSE
-            165 => (0x10, true),  // KEY_PREVIOUSSONG
-            166 => (0x24, true),  // KEY_STOPCD
-            224 => (0x66, true),  // KEY_BRIGHTNESSDOWN
-            225 => (0x67, true),  // KEY_BRIGHTNESSUP
-            227 => (0x5D, true),  // KEY_SWITCHVIDEOMODE (Display Switch / Project)
-            235 => (0x5D, true),  // KEY_DISPLAY_OFF (Display Switch)
-
-            // Numpad Cluster
-            71 => (0x47, false),  // KEY_KP7
-            72 => (0x48, false),  // KEY_KP8
-            73 => (0x49, false),  // KEY_KP9
-            74 => (0x4A, false),  // KEY_KPMINUS
-            75 => (0x4B, false),  // KEY_KP4
-            76 => (0x4C, false),  // KEY_KP5
-            77 => (0x4D, false),  // KEY_KP6
-            78 => (0x4E, false),  // KEY_KPPLUS
-            79 => (0x4F, false),  // KEY_KP1
-            80 => (0x50, false),  // KEY_KP2
-            81 => (0x51, false),  // KEY_KP3
-            82 => (0x52, false),  // KEY_KP0
-            83 => (0x53, false),  // KEY_KPDOT
-            96 => (0x1C, true),   // KEY_KPENTER
-            98 => (0x35, true),   // KEY_KPSLASH
-            55 => (0x37, false),  // KEY_KPASTERISK
+            113 => (0x20, true), // KEY_MUTE
+            114 => (0x2E, true), // KEY_VOLUMEDOWN
+            115 => (0x30, true), // KEY_VOLUMEUP
+            163 => (0x19, true), // KEY_NEXTSONG
+            164 => (0x22, true), // KEY_PLAYPAUSE
+            165 => (0x10, true), // KEY_PREVIOUSSONG
+            166 => (0x24, true), // KEY_STOPCD
+            224 => (0x66, true), // KEY_BRIGHTNESSDOWN
+            225 => (0x67, true), // KEY_BRIGHTNESSUP
+            227 => (0x5D, true), // KEY_SWITCHVIDEOMODE (Display Switch / Project)
+            235 => (0x5D, true), // KEY_DISPLAY_OFF (Display Switch)
 
             _ => return None,
         })
@@ -311,7 +293,7 @@ mod linux {
         }
 
         #[test]
-        fn maps_special_and_numpad_evdev_keycodes() {
+        fn maps_special_evdev_keycodes_and_ignores_numpad() {
             use super::evdev_to_scancode;
             // Right Ctrl
             assert_eq!(evdev_to_scancode(97), Some((0x1D, true)));
@@ -331,9 +313,11 @@ mod linux {
             assert_eq!(evdev_to_scancode(119), Some((0x45, true)));
             // Menu
             assert_eq!(evdev_to_scancode(127), Some((0x5D, true)));
-            // Numpad 0..9
-            assert_eq!(evdev_to_scancode(82), Some((0x52, false)));
-            assert_eq!(evdev_to_scancode(79), Some((0x4F, false)));
+            // Numpad keys should return None to avoid duplicate key events with egui
+            assert_eq!(evdev_to_scancode(82), None); // KP0
+            assert_eq!(evdev_to_scancode(79), None); // KP1
+            assert_eq!(evdev_to_scancode(96), None); // KPENTER
+            assert_eq!(evdev_to_scancode(98), None); // KPSLASH
             // Volume Keys
             assert_eq!(evdev_to_scancode(113), Some((0x20, true)));
             assert_eq!(evdev_to_scancode(114), Some((0x2E, true)));
@@ -342,9 +326,6 @@ mod linux {
             assert_eq!(evdev_to_scancode(224), Some((0x66, true)));
             assert_eq!(evdev_to_scancode(225), Some((0x67, true)));
             assert_eq!(evdev_to_scancode(227), Some((0x5D, true)));
-            // Numpad Enter & Divide
-            assert_eq!(evdev_to_scancode(96), Some((0x1C, true)));
-            assert_eq!(evdev_to_scancode(98), Some((0x35, true)));
         }
     }
 

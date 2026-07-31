@@ -1,15 +1,16 @@
 [package]
 name = "rust_rdp"
-version = "1.0.4"
+version = "1.0.5"
 edition = "2021"
 
 [lib]
 name = "rust_rdp"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib", "staticlib", "cdylib"]
 
 [features]
 default = []
 android = ["dep:jni", "dep:android_logger"]
+ios = []
 
 [dependencies]
 jni = { version = "0.21", optional = true }
@@ -22,7 +23,7 @@ ironrdp-graphics = { git = "https://github.com/Devolutions/IronRDP.git", rev = "
 lazy_static = "1.4"
 log = "0.4"
 android_logger = { version = "0.13", optional = true }
-tokio-rustls = "0.26"
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 picky = "=7.0.0-rc.25"
 ironrdp-core = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }

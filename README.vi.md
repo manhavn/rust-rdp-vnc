@@ -6,6 +6,7 @@
 
 | Client | Nền tảng | Giao diện |
 |--------|----------|-----------|
+| App iOS | iOS 15.0+ | Swift + SwiftUI (C FFI Bridge) |
 | App Android | Android 8+ (API 26+) | Kotlin + Jetpack Compose |
 | App desktop | Linux | Rust + egui / eframe |
 
@@ -17,7 +18,8 @@ Giao thức: **Microsoft RDP** (qua [IronRDP](https://github.com/Devolutions/Iro
 
 - Phiên RDP và VNC trên cùng một codebase
 - Backend Rust dùng chung: kết nối, giải mã hình, chuột, bàn phím
-- File kết nối (`.rdp` / `.vnc`) mở/lưu trên cả hai client
+- File kết nối (`.rdp` / `.vnc`) mở/lưu trên các nền tảng
+- iOS: Giao diện SwiftUI hiện đại, cử chỉ chạm, trackpad ảo, bàn phím ảo, phím tắt Ctrl+Alt+Del
 - Android: cử chỉ chạm, bàn phím ảo, xem remote fullscreen
 - Desktop Linux: menu, thanh công cụ, panel kết nối, zoom, fullscreen, hộp thoại file native
 
@@ -31,11 +33,20 @@ rust-rdp/
 │   └── src/
 │       ├── lib.rs     # API phiên làm việc
 │       ├── callback.rs
-│       └── android_jni.rs   # Cầu JNI (feature = "android")
+│       ├── c_ffi.rs       # Cầu nối C ABI cho iOS / Swift
+│       └── android_jni.rs # Cầu JNI (feature = "android")
+├── ios/               # Ứng dụng iOS (SwiftUI + Xcode)
+│   ├── RustRdpVnc/
+│   │   ├── Bridge/    # File C Header & Wrapper RdpClient.swift
+│   │   ├── Models/    # Model ConnectionProfile
+│   │   ├── Views/     # Giao diện SwiftUI (Form, Canvas, Bookmarks, Settings)
+│   │   └── Resources/ # Info.plist
+│   └── RustRdpVnc.xcodeproj
 ├── android/           # Ứng dụng Android
 ├── desktop/           # Ứng dụng desktop Linux
 │   ├── assets/        # Icon + file .desktop
 │   └── src/
+├── build-ios.sh       # Script build iOS (Rust static lib + Xcode)
 ├── build-dev.sh       # Build APK debug
 ├── build-release.sh   # Build APK release
 ├── build-desktop.sh   # Build binary Linux
@@ -65,6 +76,23 @@ Thành viên Cargo workspace: `rust_rdp`, `desktop`.
 - OpenGL / EGL (tùy backend eframe)
 - Stack GUI thông thường: X11 hoặc Wayland, `libxkbcommon`, …
 - Hộp thoại file (`rfd`) thường dùng portal / GTK
+
+---
+
+## Build — iOS
+
+```bash
+# Build thư viện Rust static cho iOS (thiết bị)
+./build-ios.sh release aarch64-apple-ios
+
+# Build cho iOS Simulator
+./build-ios.sh release aarch64-apple-ios-sim
+```
+
+Để build file `.app` hoặc chạy ứng dụng iOS trên thiết bị bằng Xcode (trên macOS):
+```bash
+open ios/RustRdpVnc.xcodeproj
+```
 
 ---
 

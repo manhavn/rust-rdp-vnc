@@ -1,11 +1,12 @@
+use jni::objects::{GlobalRef, JClass, JObject, JString};
+use jni::sys::{jboolean, jint};
 use jni::JNIEnv;
-use jni::objects::{JClass, JString, JObject, GlobalRef};
-use jni::sys::{jint, jboolean};
 use std::sync::Arc;
 
 use crate::{
     connect_session, disconnect_session, init_runtime, send_key_event, send_mouse_event,
-    send_mouse_horizontal_wheel_event, send_mouse_wheel_event, send_scancode_event, SessionCallback,
+    send_mouse_horizontal_wheel_event, send_mouse_wheel_event, send_scancode_event,
+    SessionCallback,
 };
 
 struct JniCallback {
@@ -33,7 +34,10 @@ impl SessionCallback for JniCallback {
     fn on_frame_decoded(&self, pixels: &[i32], x: i32, y: i32, width: i32, height: i32) {
         if let Ok(mut attached_env) = self.jvm.attach_current_thread() {
             if let Ok(jarray) = attached_env.new_int_array(pixels.len() as i32) {
-                if attached_env.set_int_array_region(&jarray, 0, pixels).is_ok() {
+                if attached_env
+                    .set_int_array_region(&jarray, 0, pixels)
+                    .is_ok()
+                {
                     let res = attached_env.call_method(
                         &self.callback,
                         "onFrameDecoded",
@@ -47,7 +51,10 @@ impl SessionCallback for JniCallback {
                         ],
                     );
                     if let Err(e) = res {
-                        self.on_state_changed(2, &format!("[Rust Log] JNI onFrameDecoded error: {:?}", e));
+                        self.on_state_changed(
+                            2,
+                            &format!("[Rust Log] JNI onFrameDecoded error: {:?}", e),
+                        );
                     }
                 } else {
                     self.on_state_changed(2, "[Rust Log] JNI set_int_array_region failed");
@@ -74,10 +81,7 @@ impl SessionCallback for JniCallback {
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_rustai_rdp_RdpClient_initJni(
-    _env: JNIEnv,
-    _class: JClass,
-) {
+pub extern "system" fn Java_com_rustai_rdp_RdpClient_initJni(_env: JNIEnv, _class: JClass) {
     init_runtime();
 }
 
@@ -122,10 +126,7 @@ pub extern "system" fn Java_com_rustai_rdp_RdpClient_connect(
 }
 
 #[no_mangle]
-pub extern "system" fn Java_com_rustai_rdp_RdpClient_disconnect(
-    _env: JNIEnv,
-    _class: JClass,
-) {
+pub extern "system" fn Java_com_rustai_rdp_RdpClient_disconnect(_env: JNIEnv, _class: JClass) {
     disconnect_session();
 }
 

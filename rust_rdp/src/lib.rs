@@ -1,46 +1,49 @@
-mod callback;
 #[cfg(feature = "android")]
 mod android_jni;
+pub mod c_ffi;
+mod callback;
 
 pub use callback::{SessionCallback, SharedCallback};
 
+use lazy_static::lazy_static;
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use lazy_static::lazy_static;
-use tokio::time::{sleep, Duration};
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use tokio_rustls::TlsConnector;
-use rustls::client::danger::{ServerCertVerifier, ServerCertVerified, HandshakeSignatureValid};
-use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
-use rustls::{DigitallySignedStruct, SignatureScheme};
 
-use ironrdp_connector::{ClientConnector, Config, Credentials, DesktopSize, BitmapConfig, ServerName as RdpServerName};
-use ironrdp_pdu::{Action, Decode, WriteBuf, ReadCursor};
-use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdatePdu, FastPathUpdate};
-use ironrdp_pdu::bitmap::Compression;
-use ironrdp_pdu::surface_commands::SurfaceCommand;
-use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
-use ironrdp_pdu::input::mouse::PointerFlags;
-use ironrdp_pdu::input::mouse_x::{MouseXPdu, PointerXFlags};
-use ironrdp_pdu::input::MousePdu;
-use ironrdp_pdu::geometry::Rectangle;
+use ironrdp_async::{connect_begin, connect_finalize, mark_as_upgraded, FramedWrite};
+use ironrdp_connector::{
+    BitmapConfig, ClientConnector, Config, Credentials, DesktopSize, ServerName as RdpServerName,
+};
+use ironrdp_dvc::DrdynvcClient;
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler};
+use ironrdp_egfx::pdu::{
+    CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesV107Flags, CapabilitiesV81Flags,
+    CapabilitySet, Codec2Type, DeleteEncodingContextPdu, EvictCacheEntryPdu, GfxPdu,
+    MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, MapSurfaceToWindowPdu, SolidFillPdu,
+    SurfaceToCachePdu, SurfaceToSurfacePdu, WireToSurface2Pdu,
+};
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
 use ironrdp_graphics::rle::RlePixelFormat;
-use ironrdp_async::{connect_begin, connect_finalize, mark_as_upgraded, FramedWrite};
-use ironrdp_tokio::{TokioFramed, split_tokio_framed};
-use ironrdp_dvc::DrdynvcClient;
-use ironrdp_egfx::client::{GraphicsPipelineClient, GraphicsPipelineHandler, BitmapUpdate};
-use ironrdp_egfx::pdu::{
-    CapabilitySet, GfxPdu, WireToSurface2Pdu, SolidFillPdu, SurfaceToSurfacePdu,
-    SurfaceToCachePdu, CacheToSurfacePdu, EvictCacheEntryPdu, MapSurfaceToWindowPdu,
-    MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, DeleteEncodingContextPdu,
-    CacheImportReplyPdu, CapabilitiesV81Flags, CapabilitiesV107Flags, Codec2Type,
-};
+use ironrdp_pdu::bitmap::Compression;
 use ironrdp_pdu::codecs::rfx::progressive::{
     decode_progressive_stream, ProgressiveBlock, ProgressiveTile,
 };
 use ironrdp_pdu::codecs::rfx::Quant;
+use ironrdp_pdu::fast_path::{FastPathHeader, FastPathUpdate, FastPathUpdatePdu};
+use ironrdp_pdu::geometry::Rectangle;
+use ironrdp_pdu::input::fast_path::{FastPathInput, FastPathInputEvent, KeyboardFlags};
+use ironrdp_pdu::input::mouse::PointerFlags;
+use ironrdp_pdu::input::mouse_x::{MouseXPdu, PointerXFlags};
+use ironrdp_pdu::input::MousePdu;
+use ironrdp_pdu::surface_commands::SurfaceCommand;
+use ironrdp_pdu::{Action, Decode, ReadCursor, WriteBuf};
+use ironrdp_tokio::{split_tokio_framed, TokioFramed};
 
 use callback::{notify_resolution_change, notify_state_change, push_frame};
 
@@ -148,35 +151,40 @@ impl ServerCertVerifier for NoVerify {
 struct SimpleNetworkClient;
 
 impl ironrdp_async::NetworkClient for SimpleNetworkClient {
-    async fn send(&mut self, _request: &ironrdp_connector::sspi::generator::NetworkRequest) -> ironrdp_connector::ConnectorResult<Vec<u8>> {
-        Err(ironrdp_connector::general_err!("SSPI network request not supported"))
+    async fn send(
+        &mut self,
+        _request: &ironrdp_connector::sspi::generator::NetworkRequest,
+    ) -> ironrdp_connector::ConnectorResult<Vec<u8>> {
+        Err(ironrdp_connector::general_err!(
+            "SSPI network request not supported"
+        ))
     }
 }
 
 fn scancode_to_keysym(scancode: u32, _is_extended: bool, shift: bool) -> Option<u32> {
     match scancode {
         // Special Keys
-        0x01 => Some(0xff1b), // Escape
-        0x0f => Some(0xff09), // Tab
-        0x0e => Some(0xff08), // Backspace
-        0x1c => Some(0xff0d), // Return
+        0x01 => Some(0xff1b),                                     // Escape
+        0x0f => Some(0xff09),                                     // Tab
+        0x0e => Some(0xff08),                                     // Backspace
+        0x1c => Some(0xff0d),                                     // Return
         0x1d => Some(if _is_extended { 0xffe4 } else { 0xffe3 }), // Control_R / Control_L
         0x38 => Some(if _is_extended { 0xffe8 } else { 0xffe7 }), // Meta_R / Meta_L (maps to Option/Alt on macOS VNC)
-        0x2a => Some(0xffe1), // Shift_L
-        0x36 => Some(0xffe2), // Shift_R
-        0x5b => Some(0xffeb), // Super_L (Win / Cmd)
-        0x5c => Some(0xffec), // Super_R (Win / Cmd)
-        0x3a => Some(0xffe5), // Caps Lock
-        0x53 => Some(0xffff), // Delete
-        0x52 => Some(0xff63), // Insert
-        0x37 => Some(0xff61), // Print Screen
-        0x45 if _is_extended => Some(0xff13), // Pause
-        0x5d if _is_extended => Some(0xff67), // Menu / ContextMenu
-        0x47 => Some(0xff50), // Home
-        0x4f => Some(0xff57), // End
-        0x49 => Some(0xff55), // Page Up
-        0x51 => Some(0xff56), // Page Down
-        
+        0x2a => Some(0xffe1),                                     // Shift_L
+        0x36 => Some(0xffe2),                                     // Shift_R
+        0x5b => Some(0xffeb),                                     // Super_L (Win / Cmd)
+        0x5c => Some(0xffec),                                     // Super_R (Win / Cmd)
+        0x3a => Some(0xffe5),                                     // Caps Lock
+        0x53 => Some(0xffff),                                     // Delete
+        0x52 => Some(0xff63),                                     // Insert
+        0x37 => Some(0xff61),                                     // Print Screen
+        0x45 if _is_extended => Some(0xff13),                     // Pause
+        0x5d if _is_extended => Some(0xff67),                     // Menu / ContextMenu
+        0x47 => Some(0xff50),                                     // Home
+        0x4f => Some(0xff57),                                     // End
+        0x49 => Some(0xff55),                                     // Page Up
+        0x51 => Some(0xff56),                                     // Page Down
+
         // Arrows
         0x4b => Some(0xff51), // Left
         0x48 => Some(0xff52), // Up
@@ -219,7 +227,7 @@ fn scancode_to_keysym(scancode: u32, _is_extended: bool, shift: bool) -> Option<
         0x17 => Some(if shift { 0x49 } else { 0x69 }), // I / i
         0x18 => Some(if shift { 0x4f } else { 0x6f }), // O / o
         0x19 => Some(if shift { 0x50 } else { 0x70 }), // P / p
-        
+
         0x1e => Some(if shift { 0x41 } else { 0x61 }), // A / a
         0x1f => Some(if shift { 0x53 } else { 0x73 }), // S / s
         0x20 => Some(if shift { 0x44 } else { 0x64 }), // D / d
@@ -229,7 +237,7 @@ fn scancode_to_keysym(scancode: u32, _is_extended: bool, shift: bool) -> Option<
         0x24 => Some(if shift { 0x4a } else { 0x6a }), // J / j
         0x25 => Some(if shift { 0x4b } else { 0x6b }), // K / k
         0x26 => Some(if shift { 0x4c } else { 0x6c }), // L / l
-        
+
         0x2c => Some(if shift { 0x5a } else { 0x7a }), // Z / z
         0x2d => Some(if shift { 0x58 } else { 0x78 }), // X / x
         0x2e => Some(if shift { 0x43 } else { 0x63 }), // C / c
@@ -248,7 +256,7 @@ fn scancode_to_keysym(scancode: u32, _is_extended: bool, shift: bool) -> Option<
         0x33 => Some(if shift { 0x3c } else { 0x2c }), // , -> <
         0x34 => Some(if shift { 0x3e } else { 0x2e }), // . -> >
         0x35 => Some(if shift { 0x3f } else { 0x2f }), // / -> ?
-        0x39 => Some(0x20), // Space
+        0x39 => Some(0x20),                            // Space
 
         // Function Keys
         0x3b => Some(0xffbe), // F1
@@ -281,28 +289,29 @@ fn copy_vnc_rect_to_screen(
 ) {
     let rect_w = rect.width as i32;
     let rect_h = rect.height as i32;
-    
+
     for dy in 0..rect_h {
         let dest_y = rect.y as i32 + dy;
         if dest_y < 0 || dest_y >= screen_h {
             continue;
         }
-        
+
         for dx in 0..rect_w {
             let dest_x = rect.x as i32 + dx;
             if dest_x < 0 || dest_x >= screen_w {
                 continue;
             }
-            
+
             let dest_idx = (dest_y * screen_w + dest_x) as usize;
             let src_pixel_idx = (dy * rect_w + dx) as usize;
-            
+
             if src_pixel_idx * 4 + 3 < decoded_data.len() {
                 let b = decoded_data[src_pixel_idx * 4];
                 let g = decoded_data[src_pixel_idx * 4 + 1];
                 let r = decoded_data[src_pixel_idx * 4 + 2];
                 let a = decoded_data[src_pixel_idx * 4 + 3];
-                screen_pixels[dest_idx] = (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
+                screen_pixels[dest_idx] =
+                    (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
             }
         }
     }
@@ -317,7 +326,7 @@ fn copy_vnc_screen_rect(
 ) {
     let rect_w = dst.width as i32;
     let rect_h = dst.height as i32;
-    
+
     let y_range: Vec<i32> = (0..rect_h).collect();
     let y_iterator: Box<dyn Iterator<Item = i32>> = if dst.y > src.y {
         Box::new(y_range.into_iter().rev())
@@ -362,28 +371,29 @@ fn copy_gfx_bitmap_to_screen(
 ) {
     let rect_w = rect.width() as i32;
     let rect_h = rect.height() as i32;
-    
+
     for dy in 0..rect_h {
         let dest_y = rect.top as i32 + dy;
         if dest_y < 0 || dest_y >= screen_h {
             continue;
         }
-        
+
         for dx in 0..rect_w {
             let dest_x = rect.left as i32 + dx;
             if dest_x < 0 || dest_x >= screen_w {
                 continue;
             }
-            
+
             let dest_idx = (dest_y * screen_w + dest_x) as usize;
             let src_pixel_idx = (dy * rect_w + dx) as usize;
-            
+
             if src_pixel_idx * 4 + 3 < decoded_data.len() {
                 let r = decoded_data[src_pixel_idx * 4];
                 let g = decoded_data[src_pixel_idx * 4 + 1];
                 let b = decoded_data[src_pixel_idx * 4 + 2];
                 let a = decoded_data[src_pixel_idx * 4 + 3];
-                screen_pixels[dest_idx] = (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
+                screen_pixels[dest_idx] =
+                    (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
             }
         }
     }
@@ -414,7 +424,8 @@ fn copy_tile_to_screen(
                 let g = tile_rgba[src_pixel_idx * 4 + 1];
                 let b = tile_rgba[src_pixel_idx * 4 + 2];
                 let a = tile_rgba[src_pixel_idx * 4 + 3];
-                screen_pixels[dest_idx] = (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
+                screen_pixels[dest_idx] =
+                    (((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32;
             }
         }
     }
@@ -454,30 +465,39 @@ fn decode_progressive_stream_to_screen(
                         let mut cr_coeffs = [0i16; 4096];
                         let mut temp = [0i16; 4096];
 
-                        let q_y = region.quant_vals.get(t.quant_idx_y as usize)
+                        let q_y = region
+                            .quant_vals
+                            .get(t.quant_idx_y as usize)
                             .ok_or_else(|| "Quant index Y out of range".to_string())?;
-                        let q_cb = region.quant_vals.get(t.quant_idx_cb as usize)
+                        let q_cb = region
+                            .quant_vals
+                            .get(t.quant_idx_cb as usize)
                             .ok_or_else(|| "Quant index Cb out of range".to_string())?;
-                        let q_cr = region.quant_vals.get(t.quant_idx_cr as usize)
+                        let q_cr = region
+                            .quant_vals
+                            .get(t.quant_idx_cr as usize)
                             .ok_or_else(|| "Quant index Cr out of range".to_string())?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.y_data,
                             &mut y_coeffs,
-                        ).map_err(|e| format!("RLGR Y decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Y decode failed: {:?}", e))?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.cb_data,
                             &mut cb_coeffs,
-                        ).map_err(|e| format!("RLGR Cb decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Cb decode failed: {:?}", e))?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.cr_data,
                             &mut cr_coeffs,
-                        ).map_err(|e| format!("RLGR Cr decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Cr decode failed: {:?}", e))?;
 
                         ironrdp_graphics::subband_reconstruction::decode(&mut y_coeffs[4032..]);
                         ironrdp_graphics::subband_reconstruction::decode(&mut cb_coeffs[4032..]);
@@ -521,30 +541,39 @@ fn decode_progressive_stream_to_screen(
                         let mut cr_coeffs = [0i16; 4096];
                         let mut temp = [0i16; 4096];
 
-                        let q_y = region.quant_vals.get(t.quant_idx_y as usize)
+                        let q_y = region
+                            .quant_vals
+                            .get(t.quant_idx_y as usize)
                             .ok_or_else(|| "Quant index Y out of range".to_string())?;
-                        let q_cb = region.quant_vals.get(t.quant_idx_cb as usize)
+                        let q_cb = region
+                            .quant_vals
+                            .get(t.quant_idx_cb as usize)
                             .ok_or_else(|| "Quant index Cb out of range".to_string())?;
-                        let q_cr = region.quant_vals.get(t.quant_idx_cr as usize)
+                        let q_cr = region
+                            .quant_vals
+                            .get(t.quant_idx_cr as usize)
                             .ok_or_else(|| "Quant index Cr out of range".to_string())?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.y_data,
                             &mut y_coeffs,
-                        ).map_err(|e| format!("RLGR Y decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Y decode failed: {:?}", e))?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.cb_data,
                             &mut cb_coeffs,
-                        ).map_err(|e| format!("RLGR Cb decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Cb decode failed: {:?}", e))?;
 
                         ironrdp_graphics::rlgr::decode(
                             ironrdp_pdu::codecs::rfx::EntropyAlgorithm::Rlgr1,
                             t.cr_data,
                             &mut cr_coeffs,
-                        ).map_err(|e| format!("RLGR Cr decode failed: {:?}", e))?;
+                        )
+                        .map_err(|e| format!("RLGR Cr decode failed: {:?}", e))?;
 
                         ironrdp_graphics::subband_reconstruction::decode(&mut y_coeffs[4032..]);
                         ironrdp_graphics::subband_reconstruction::decode(&mut cb_coeffs[4032..]);
@@ -612,25 +641,41 @@ impl GraphicsPipelineHandler for MyGfxHandler {
     }
 
     fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] Capabilities confirmed: {:?}", caps));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!("[Rust Log] Capabilities confirmed: {:?}", caps),
+        );
     }
 
     fn on_reset_graphics(&mut self, width: u32, height: u32) {
         let w = width as i32;
         let h = height as i32;
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_reset_graphics received: {}x{}", w, h));
-        
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!("[Rust Log] on_reset_graphics received: {}x{}", w, h),
+        );
+
         self.width = w;
         self.height = h;
-        
+
         let mut pixels = self.screen_pixels.lock().unwrap();
         pixels.resize((w * h) as usize, 0);
-        
+
         notify_resolution_change(self.callback.as_ref(), w, h);
     }
 
     fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_bitmap_updated: rect=({:?}), data={}", update.destination_rectangle, update.data.len()));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_bitmap_updated: rect=({:?}), data={}",
+                update.destination_rectangle,
+                update.data.len()
+            ),
+        );
         let mut pixels = self.screen_pixels.lock().unwrap();
         copy_gfx_bitmap_to_screen(
             &mut pixels,
@@ -642,63 +687,157 @@ impl GraphicsPipelineHandler for MyGfxHandler {
     }
 
     fn on_frame_complete(&mut self, frame_id: u32) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_frame_complete: frame_id={}", frame_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!("[Rust Log] on_frame_complete: frame_id={}", frame_id),
+        );
         let pixels = self.screen_pixels.lock().unwrap();
         push_frame(self.callback.as_ref(), &pixels, self.width, self.height);
     }
 
     fn on_wire_to_surface2(&mut self, pdu: &WireToSurface2Pdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_wire_to_surface2: codec_id={:?}, data_len={}", pdu.codec_id, pdu.bitmap_data.len()));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_wire_to_surface2: codec_id={:?}, data_len={}",
+                pdu.codec_id,
+                pdu.bitmap_data.len()
+            ),
+        );
         if pdu.codec_id == Codec2Type::RemoteFxProgressive {
             let mut pixels = self.screen_pixels.lock().unwrap();
-            if let Err(e) = decode_progressive_stream_to_screen(&pdu.bitmap_data, &mut pixels, self.width, self.height) {
-                notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] progressive decode error: {:?}", e));
+            if let Err(e) = decode_progressive_stream_to_screen(
+                &pdu.bitmap_data,
+                &mut pixels,
+                self.width,
+                self.height,
+            ) {
+                notify_state_change(
+                    self.callback.as_ref(),
+                    2,
+                    &format!("[Rust Log] progressive decode error: {:?}", e),
+                );
             }
         }
     }
 
     fn on_solid_fill(&mut self, pdu: &SolidFillPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_solid_fill: surface_id={}, color={:?}, rects={}", pdu.surface_id, pdu.fill_pixel, pdu.rectangles.len()));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_solid_fill: surface_id={}, color={:?}, rects={}",
+                pdu.surface_id,
+                pdu.fill_pixel,
+                pdu.rectangles.len()
+            ),
+        );
     }
 
     fn on_surface_to_surface(&mut self, pdu: &SurfaceToSurfacePdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_surface_to_surface: src={}, dest={}", pdu.source_surface_id, pdu.destination_surface_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_surface_to_surface: src={}, dest={}",
+                pdu.source_surface_id, pdu.destination_surface_id
+            ),
+        );
     }
 
     fn on_surface_to_cache(&mut self, pdu: &SurfaceToCachePdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_surface_to_cache: surface_id={}, slot={}", pdu.surface_id, pdu.cache_slot));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_surface_to_cache: surface_id={}, slot={}",
+                pdu.surface_id, pdu.cache_slot
+            ),
+        );
     }
 
     fn on_cache_to_surface(&mut self, pdu: &CacheToSurfacePdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_cache_to_surface: surface_id={}, slot={}", pdu.surface_id, pdu.cache_slot));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_cache_to_surface: surface_id={}, slot={}",
+                pdu.surface_id, pdu.cache_slot
+            ),
+        );
     }
 
     fn on_evict_cache_entry(&mut self, pdu: &EvictCacheEntryPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_evict_cache_entry: slot={}", pdu.cache_slot));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!("[Rust Log] on_evict_cache_entry: slot={}", pdu.cache_slot),
+        );
     }
 
     fn on_map_surface_to_window(&mut self, pdu: &MapSurfaceToWindowPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_map_surface_to_window: surface_id={}, window_id={}", pdu.surface_id, pdu.window_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_map_surface_to_window: surface_id={}, window_id={}",
+                pdu.surface_id, pdu.window_id
+            ),
+        );
     }
 
     fn on_map_surface_to_scaled_output(&mut self, pdu: &MapSurfaceToScaledOutputPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_map_surface_to_scaled_output: surface_id={}", pdu.surface_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_map_surface_to_scaled_output: surface_id={}",
+                pdu.surface_id
+            ),
+        );
     }
 
     fn on_map_surface_to_scaled_window(&mut self, pdu: &MapSurfaceToScaledWindowPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_map_surface_to_scaled_window: surface_id={}", pdu.surface_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_map_surface_to_scaled_window: surface_id={}",
+                pdu.surface_id
+            ),
+        );
     }
 
     fn on_delete_encoding_context(&mut self, pdu: &DeleteEncodingContextPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_delete_encoding_context: surface_id={}", pdu.surface_id));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_delete_encoding_context: surface_id={}",
+                pdu.surface_id
+            ),
+        );
     }
 
     fn on_cache_import_reply(&mut self, pdu: &CacheImportReplyPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_cache_import_reply: slots={}", pdu.cache_slots.len()));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!(
+                "[Rust Log] on_cache_import_reply: slots={}",
+                pdu.cache_slots.len()
+            ),
+        );
     }
 
     fn on_unhandled_pdu(&mut self, pdu: &GfxPdu) {
-        notify_state_change(self.callback.as_ref(), 2, &format!("[Rust Log] on_unhandled_pdu: {:?}", pdu));
+        notify_state_change(
+            self.callback.as_ref(),
+            2,
+            &format!("[Rust Log] on_unhandled_pdu: {:?}", pdu),
+        );
     }
 }
 
@@ -713,32 +852,36 @@ fn copy_bitmap_to_screen(
 ) {
     let rect_w = rect.width() as i32;
     let rect_h = rect.height() as i32;
-    
+
     for dy in 0..rect_h {
         let dest_y = rect.top as i32 + (rect_h - 1 - dy);
         if dest_y < 0 || dest_y >= screen_h {
             continue;
         }
-        
+
         for dx in 0..rect_w {
             let dest_x = rect.left as i32 + dx;
             if dest_x < 0 || dest_x >= screen_w {
                 continue;
             }
-            
+
             let dest_idx = (dest_y * screen_w + dest_x) as usize;
             let src_pixel_idx = (dy * rect_w + dx) as usize;
-            
+
             let pixel_color = match format {
                 RlePixelFormat::Rgb24 => {
-                    if src_pixel_idx * 3 + 2 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 3 + 2 >= decoded_data.len() {
+                        continue;
+                    }
                     let r = decoded_data[src_pixel_idx * 3];
                     let g = decoded_data[src_pixel_idx * 3 + 1];
                     let b = decoded_data[src_pixel_idx * 3 + 2];
                     ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                 }
                 RlePixelFormat::Rgb16 => {
-                    if src_pixel_idx * 2 + 1 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 2 + 1 >= decoded_data.len() {
+                        continue;
+                    }
                     let val = u16::from_le_bytes([
                         decoded_data[src_pixel_idx * 2],
                         decoded_data[src_pixel_idx * 2 + 1],
@@ -749,7 +892,9 @@ fn copy_bitmap_to_screen(
                     ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                 }
                 RlePixelFormat::Rgb15 => {
-                    if src_pixel_idx * 2 + 1 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 2 + 1 >= decoded_data.len() {
+                        continue;
+                    }
                     let val = u16::from_le_bytes([
                         decoded_data[src_pixel_idx * 2],
                         decoded_data[src_pixel_idx * 2 + 1],
@@ -761,19 +906,23 @@ fn copy_bitmap_to_screen(
                 }
                 RlePixelFormat::Rgb8 => {
                     if bpp == 32 {
-                        if src_pixel_idx * 4 + 2 >= decoded_data.len() { continue; }
+                        if src_pixel_idx * 4 + 2 >= decoded_data.len() {
+                            continue;
+                        }
                         let b = decoded_data[src_pixel_idx * 4];
                         let g = decoded_data[src_pixel_idx * 4 + 1];
                         let r = decoded_data[src_pixel_idx * 4 + 2];
                         ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                     } else {
-                        if src_pixel_idx >= decoded_data.len() { continue; }
+                        if src_pixel_idx >= decoded_data.len() {
+                            continue;
+                        }
                         let val = decoded_data[src_pixel_idx] as u32;
                         ((0xffu32 << 24) | (val << 16) | (val << 8) | val) as i32
                     }
                 }
             };
-            
+
             screen_pixels[dest_idx] = pixel_color;
         }
     }
@@ -790,32 +939,36 @@ fn copy_surface_to_screen(
 ) {
     let rect_w = rect.width() as i32;
     let rect_h = rect.height() as i32;
-    
+
     for dy in 0..rect_h {
         let dest_y = rect.top as i32 + dy;
         if dest_y < 0 || dest_y >= screen_h {
             continue;
         }
-        
+
         for dx in 0..rect_w {
             let dest_x = rect.left as i32 + dx;
             if dest_x < 0 || dest_x >= screen_w {
                 continue;
             }
-            
+
             let dest_idx = (dest_y * screen_w + dest_x) as usize;
             let src_pixel_idx = (dy * rect_w + dx) as usize;
-            
+
             let pixel_color = match format {
                 RlePixelFormat::Rgb24 => {
-                    if src_pixel_idx * 3 + 2 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 3 + 2 >= decoded_data.len() {
+                        continue;
+                    }
                     let r = decoded_data[src_pixel_idx * 3];
                     let g = decoded_data[src_pixel_idx * 3 + 1];
                     let b = decoded_data[src_pixel_idx * 3 + 2];
                     ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                 }
                 RlePixelFormat::Rgb16 => {
-                    if src_pixel_idx * 2 + 1 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 2 + 1 >= decoded_data.len() {
+                        continue;
+                    }
                     let val = u16::from_le_bytes([
                         decoded_data[src_pixel_idx * 2],
                         decoded_data[src_pixel_idx * 2 + 1],
@@ -826,7 +979,9 @@ fn copy_surface_to_screen(
                     ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                 }
                 RlePixelFormat::Rgb15 => {
-                    if src_pixel_idx * 2 + 1 >= decoded_data.len() { continue; }
+                    if src_pixel_idx * 2 + 1 >= decoded_data.len() {
+                        continue;
+                    }
                     let val = u16::from_le_bytes([
                         decoded_data[src_pixel_idx * 2],
                         decoded_data[src_pixel_idx * 2 + 1],
@@ -838,19 +993,23 @@ fn copy_surface_to_screen(
                 }
                 RlePixelFormat::Rgb8 => {
                     if bpp == 32 {
-                        if src_pixel_idx * 4 + 2 >= decoded_data.len() { continue; }
+                        if src_pixel_idx * 4 + 2 >= decoded_data.len() {
+                            continue;
+                        }
                         let b = decoded_data[src_pixel_idx * 4];
                         let g = decoded_data[src_pixel_idx * 4 + 1];
                         let r = decoded_data[src_pixel_idx * 4 + 2];
                         ((0xffu32 << 24) | ((r as u32) << 16) | ((g as u32) << 8) | b as u32) as i32
                     } else {
-                        if src_pixel_idx >= decoded_data.len() { continue; }
+                        if src_pixel_idx >= decoded_data.len() {
+                            continue;
+                        }
                         let val = decoded_data[src_pixel_idx] as u32;
                         ((0xffu32 << 24) | (val << 16) | (val << 8) | val) as i32
                     }
                 }
             };
-            
+
             screen_pixels[dest_idx] = pixel_color;
         }
     }
@@ -862,7 +1021,7 @@ fn read_der_length(der: &[u8], cursor: &mut usize) -> Option<usize> {
     }
     let first = der[*cursor];
     *cursor += 1;
-    
+
     if first < 0x80 {
         Some(first as usize)
     } else {
@@ -881,16 +1040,16 @@ fn read_der_length(der: &[u8], cursor: &mut usize) -> Option<usize> {
 
 fn extract_raw_public_key(spki_der: &[u8]) -> Option<Vec<u8>> {
     let mut cursor = 0;
-    
+
     // Read SEQUENCE tag
     if cursor >= spki_der.len() || spki_der[cursor] != 0x30 {
         return None;
     }
     cursor += 1;
-    
+
     // Read SEQUENCE length
     let _seq_len = read_der_length(spki_der, &mut cursor)?;
-    
+
     // Read algorithm (AlgorithmIdentifier SEQUENCE)
     if cursor >= spki_der.len() || spki_der[cursor] != 0x30 {
         return None;
@@ -898,27 +1057,26 @@ fn extract_raw_public_key(spki_der: &[u8]) -> Option<Vec<u8>> {
     cursor += 1;
     let alg_len = read_der_length(spki_der, &mut cursor)?;
     cursor += alg_len; // Skip AlgorithmIdentifier
-    
+
     // Read subjectPublicKey BIT STRING (Tag 0x03)
     if cursor >= spki_der.len() || spki_der[cursor] != 0x03 {
         return None;
     }
     cursor += 1;
-    
+
     let bit_str_len = read_der_length(spki_der, &mut cursor)?;
     if cursor + bit_str_len > spki_der.len() {
         return None;
     }
-    
+
     // The BIT STRING value starts with a single byte indicating the number of unused bits (usually 0)
     let unused_bits = spki_der[cursor];
     if unused_bits != 0 {
         return None;
     }
-    
-    Some(spki_der[cursor + 1 .. cursor + bit_str_len].to_vec())
-}
 
+    Some(spki_der[cursor + 1..cursor + bit_str_len].to_vec())
+}
 
 // ---------------------------------------------------------------------------
 // Public session API (used by Android JNI and desktop Linux)
@@ -930,7 +1088,7 @@ pub fn init_runtime() {
         android_logger::init_once(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Debug)
-                .with_tag("RdpRustBackend")
+                .with_tag("RdpRustBackend"),
         );
     }
     log::info!("Tokio Runtime loading");
@@ -946,6 +1104,7 @@ pub fn init_runtime() {
 
 /// Start a new remote session and return its id for multi-tab clients.
 /// Input APIs target the active session ([`set_active_session`]); new connects become active.
+#[allow(clippy::too_many_arguments)]
 pub fn connect_session(
     host_str: String,
     port: i32,
@@ -959,13 +1118,21 @@ pub fn connect_session(
 ) -> u64 {
     let host_str = host_str.trim().to_string();
     let user_str = user_str.trim().to_string();
-    let pass_str = pass_str.trim_matches(|c| c == '\r' || c == '\n').to_string();
+    let pass_str = pass_str
+        .trim_matches(|c| c == '\r' || c == '\n')
+        .to_string();
     let domain_str = domain_str.trim().to_string();
     let conn_mode_str = conn_mode_str.trim().to_string();
 
     log::info!(
         "Connecting ({}). Host: {}, Port: {}, User: {}, Domain: {}, Width: {}, Height: {}",
-        conn_mode_str, host_str, port, user_str, domain_str, width, height
+        conn_mode_str,
+        host_str,
+        port,
+        user_str,
+        domain_str,
+        width,
+        height
     );
 
     let active = Arc::new(Mutex::new(true));
@@ -990,7 +1157,7 @@ pub fn connect_session(
 
         let callback_clone = callback.clone();
         let active_clone = active.clone();
-        
+
         let rt_guard = RUNTIME.lock().unwrap();
         if let Some(ref rt) = *rt_guard {
             rt.spawn(async move {
@@ -1026,15 +1193,15 @@ pub fn connect_session(
                                                 let mut current_width = width;
                                                 let mut current_height = height;
                                                 let mut screen_pixels = vec![0i32; (current_width * current_height) as usize];
-                                                
-                                                 // Request initial full refresh
-                                                 let _ = vnc_client.input(vnc::X11Event::FullRefresh).await;
 
-                                                 // Loop for event polling and input processing
-                                                 let mut needs_refresh = false;
-                                                 let mut last_render = tokio::time::Instant::now();
-                                                 
-                                                 while *active_clone.lock().unwrap() {
+                                                // Request initial full refresh
+                                                let _ = vnc_client.input(vnc::X11Event::FullRefresh).await;
+
+                                                // Loop for event polling and input processing
+                                                let mut needs_refresh = false;
+                                                let mut last_render = tokio::time::Instant::now();
+
+                                                while *active_clone.lock().unwrap() {
                                                      let mut idle = true;
 
                                                      // 1. Process all pending incoming VNC events
@@ -1146,14 +1313,14 @@ pub fn connect_session(
     let session_id = register_session(session.clone());
     log::info!("Registered RDP session id={session_id}");
 
-        let callback_clone = callback.clone();
-        let active_clone = active.clone();
-        let screen_pixels_shared = Arc::new(Mutex::new(vec![0i32; (width * height) as usize]));
+    let callback_clone = callback.clone();
+    let active_clone = active.clone();
+    let screen_pixels_shared = Arc::new(Mutex::new(vec![0i32; (width * height) as usize]));
 
-        // Run connection logic on tokio runtime
-        let rt_guard = RUNTIME.lock().unwrap();
-        if let Some(ref rt) = *rt_guard {
-            rt.spawn(async move {
+    // Run connection logic on tokio runtime
+    let rt_guard = RUNTIME.lock().unwrap();
+    if let Some(ref rt) = *rt_guard {
+        rt.spawn(async move {
                 // Parse username and domain
                 let (parsed_user, parsed_domain) = if user_str.contains('\\') {
                     let mut parts = user_str.splitn(2, '\\');
@@ -1300,16 +1467,14 @@ pub fn connect_session(
                             log::info!("Upgrading connection to TLS...");
                             let (tcp_stream, leftover) = framed.into_inner();
 
-                            let tls_config = match rustls::ClientConfig::builder_with_provider(
-                                Arc::new(rustls::crypto::ring::default_provider())
+                            let tls_config = rustls::ClientConfig::builder_with_provider(
+                                Arc::new(rustls::crypto::ring::default_provider()),
                             )
                             .with_safe_default_protocol_versions()
                             .unwrap()
                             .dangerous()
                             .with_custom_certificate_verifier(Arc::new(NoVerify))
-                            .with_no_client_auth() {
-                                config => config,
-                            };
+                            .with_no_client_auth();
 
                             let server_name = match ServerName::try_from(host_str.clone()) {
                                 Ok(sn) => sn.to_owned(),
@@ -1407,7 +1572,7 @@ pub fn connect_session(
                             if let Some((desc, err)) = credssp_failure {
                                 format!("Server requires NLA (CredSSP). NLA authentication failed ({}): {}", desc, err)
                             } else {
-                                format!("Server requires NLA (CredSSP), but CredSSP negotiation failed.")
+                                "Server requires NLA (CredSSP), but CredSSP negotiation failed.".to_string()
                             }
                         } else {
                             attempt_errors.iter()
@@ -1466,11 +1631,7 @@ pub fn connect_session(
                                                                         None
                                                                     }
                                                                 } else {
-                                                                    if let Ok(fmt) = ironrdp_graphics::rle::decompress(rect.bitmap_data, &mut decompressed_buf, w, h, rect.bits_per_pixel as usize) {
-                                                                        Some(fmt)
-                                                                    } else {
-                                                                        None
-                                                                    }
+                                                                    ironrdp_graphics::rle::decompress(rect.bitmap_data, &mut decompressed_buf, w, h, rect.bits_per_pixel as usize).ok()
                                                                 }
                                                             } else {
                                                                 decompressed_buf.extend_from_slice(rect.bitmap_data);
@@ -1624,7 +1785,7 @@ pub fn connect_session(
                     }
                 }
             });
-        }
+    }
 
     session_id
 }
@@ -1673,87 +1834,87 @@ pub fn disconnect_session() {
 /// 7 = extra1 (back/prev) down, 8 = extra1 up,
 /// 9 = extra2 (next/forward) down, 10 = extra2 up
 pub fn send_mouse_event(x: i32, y: i32, action: i32) {
-    with_active_session(|sess| {
-        match &sess.session_type {
-            SessionType::Rdp { input_tx } => {
-                match action {
-                    7 => {
-                        let mouse_pdu = MouseXPdu {
-                            flags: PointerXFlags::DOWN | PointerXFlags::BUTTON1,
-                            x_position: x as u16,
-                            y_position: y as u16,
-                        };
-                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
-                    }
-                    8 => {
-                        let mouse_pdu = MouseXPdu {
-                            flags: PointerXFlags::BUTTON1,
-                            x_position: x as u16,
-                            y_position: y as u16,
-                        };
-                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
-                    }
-                    9 => {
-                        let mouse_pdu = MouseXPdu {
-                            flags: PointerXFlags::DOWN | PointerXFlags::BUTTON2,
-                            x_position: x as u16,
-                            y_position: y as u16,
-                        };
-                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
-                    }
-                    10 => {
-                        let mouse_pdu = MouseXPdu {
-                            flags: PointerXFlags::BUTTON2,
-                            x_position: x as u16,
-                            y_position: y as u16,
-                        };
-                        let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
-                    }
-                    _ => {
-                        let flags = match action {
-                            0 => PointerFlags::MOVE,
-                            1 => PointerFlags::DOWN | PointerFlags::LEFT_BUTTON,
-                            2 => PointerFlags::LEFT_BUTTON,
-                            3 => PointerFlags::DOWN | PointerFlags::RIGHT_BUTTON,
-                            4 => PointerFlags::RIGHT_BUTTON,
-                            5 => PointerFlags::DOWN | PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                            6 => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
-                            _ => PointerFlags::MOVE,
-                        };
-                        let mouse_pdu = MousePdu {
-                            flags,
-                            number_of_wheel_rotation_units: 0,
-                            x_position: x as u16,
-                            y_position: y as u16,
-                        };
-                        let event = FastPathInputEvent::MouseEvent(mouse_pdu);
-                        let _ = input_tx.send(event);
-                    }
-                }
-            }
-            SessionType::Vnc { input_tx, button_mask, .. } => {
-                let mut mask = button_mask.lock().unwrap();
-                match action {
-                    1 => *mask |= 1,
-                    2 => *mask &= !1,
-                    3 => *mask |= 4,
-                    4 => *mask &= !4,
-                    5 => *mask |= 2,
-                    6 => *mask &= !2,
-                    7 => *mask |= 64,
-                    8 => *mask &= !64,
-                    9 => *mask |= 128,
-                    10 => *mask &= !128,
-                    _ => {}
-                }
-                let mouse_event = vnc::ClientMouseEvent {
-                    position_x: x as u16,
-                    position_y: y as u16,
-                    bottons: *mask,
+    with_active_session(|sess| match &sess.session_type {
+        SessionType::Rdp { input_tx } => match action {
+            7 => {
+                let mouse_pdu = MouseXPdu {
+                    flags: PointerXFlags::DOWN | PointerXFlags::BUTTON1,
+                    x_position: x as u16,
+                    y_position: y as u16,
                 };
-                let event = vnc::X11Event::PointerEvent(mouse_event);
+                let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+            }
+            8 => {
+                let mouse_pdu = MouseXPdu {
+                    flags: PointerXFlags::BUTTON1,
+                    x_position: x as u16,
+                    y_position: y as u16,
+                };
+                let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+            }
+            9 => {
+                let mouse_pdu = MouseXPdu {
+                    flags: PointerXFlags::DOWN | PointerXFlags::BUTTON2,
+                    x_position: x as u16,
+                    y_position: y as u16,
+                };
+                let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+            }
+            10 => {
+                let mouse_pdu = MouseXPdu {
+                    flags: PointerXFlags::BUTTON2,
+                    x_position: x as u16,
+                    y_position: y as u16,
+                };
+                let _ = input_tx.send(FastPathInputEvent::MouseEventEx(mouse_pdu));
+            }
+            _ => {
+                let flags = match action {
+                    0 => PointerFlags::MOVE,
+                    1 => PointerFlags::DOWN | PointerFlags::LEFT_BUTTON,
+                    2 => PointerFlags::LEFT_BUTTON,
+                    3 => PointerFlags::DOWN | PointerFlags::RIGHT_BUTTON,
+                    4 => PointerFlags::RIGHT_BUTTON,
+                    5 => PointerFlags::DOWN | PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                    6 => PointerFlags::MIDDLE_BUTTON_OR_WHEEL,
+                    _ => PointerFlags::MOVE,
+                };
+                let mouse_pdu = MousePdu {
+                    flags,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: x as u16,
+                    y_position: y as u16,
+                };
+                let event = FastPathInputEvent::MouseEvent(mouse_pdu);
                 let _ = input_tx.send(event);
             }
+        },
+        SessionType::Vnc {
+            input_tx,
+            button_mask,
+            ..
+        } => {
+            let mut mask = button_mask.lock().unwrap();
+            match action {
+                1 => *mask |= 1,
+                2 => *mask &= !1,
+                3 => *mask |= 4,
+                4 => *mask &= !4,
+                5 => *mask |= 2,
+                6 => *mask &= !2,
+                7 => *mask |= 64,
+                8 => *mask &= !64,
+                9 => *mask |= 128,
+                10 => *mask &= !128,
+                _ => {}
+            }
+            let mouse_event = vnc::ClientMouseEvent {
+                position_x: x as u16,
+                position_y: y as u16,
+                bottons: *mask,
+            };
+            let event = vnc::X11Event::PointerEvent(mouse_event);
+            let _ = input_tx.send(event);
         }
     });
 }
@@ -1782,7 +1943,7 @@ fn vnc_wheel_steps(units: i32) -> u32 {
     // VNC represents wheel motion as button presses rather than a signed
     // rotation value. Keep a finite burst cap while allowing responsive macOS
     // scrolling from the desktop client.
-    ((units.unsigned_abs() + 59) / 60).clamp(1, 32)
+    units.unsigned_abs().div_ceil(60).clamp(1, 32)
 }
 
 pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
@@ -1811,7 +1972,11 @@ pub fn send_mouse_wheel_event(x: i32, y: i32, units: i32) {
                     let _ = input_tx.send(FastPathInputEvent::MouseEvent(mouse_pdu));
                 }
             }
-            SessionType::Vnc { input_tx, button_mask, .. } => {
+            SessionType::Vnc {
+                input_tx,
+                button_mask,
+                ..
+            } => {
                 // Positive units = scroll up (button 4). Negative = scroll down (button 5).
                 let mask = button_mask.lock().unwrap();
                 let wheel_bit = if units > 0 { 8 } else { 16 };
@@ -1872,7 +2037,11 @@ pub fn send_mouse_horizontal_wheel_event(x: i32, y: i32, units: i32) {
                     let _ = input_tx.send(FastPathInputEvent::MouseEvent(mouse_pdu));
                 }
             }
-            SessionType::Vnc { input_tx, button_mask, .. } => {
+            SessionType::Vnc {
+                input_tx,
+                button_mask,
+                ..
+            } => {
                 let mask = button_mask.lock().unwrap();
                 // Button 6 (64) is Scroll Right, Button 5 (32) is Scroll Left
                 let wheel_bit = if units > 0 { 64 } else { 32 };
@@ -1960,7 +2129,11 @@ pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
                 let event = FastPathInputEvent::KeyboardEvent(flags, scancode as u8);
                 let _ = input_tx.send(event);
             }
-            SessionType::Vnc { input_tx, shift_down, .. } => {
+            SessionType::Vnc {
+                input_tx,
+                shift_down,
+                ..
+            } => {
                 if scancode == 0x2A || scancode == 0x36 {
                     *shift_down.lock().unwrap() = down;
                 }

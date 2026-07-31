@@ -23,11 +23,6 @@ pub fn notify_resolution_change(callback: &dyn SessionCallback, width: i32, heig
     callback.on_resolution_changed(width, height);
 }
 
-pub fn push_frame(
-    callback: &dyn SessionCallback,
-    pixels: &[i32],
-    width: i32,
-    height: i32,
-) {
+pub fn push_frame(callback: &dyn SessionCallback, pixels: &[i32], width: i32, height: i32) {
     callback.on_frame_decoded(pixels, 0, 0, width, height);
 }

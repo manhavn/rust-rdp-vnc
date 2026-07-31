@@ -5,6 +5,7 @@ use egui::Key;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeyTransition {
     pub key: Key,
+    pub physical_key: Option<Key>,
     pub pressed: bool,
 }
 
@@ -27,6 +28,7 @@ impl RemoteKeyboardState {
             egui::Event::Paste(_) => self.clipboard_key_down(Key::V),
             egui::Event::Key {
                 key,
+                physical_key,
                 pressed,
                 repeat: _,
                 modifiers,
@@ -34,6 +36,7 @@ impl RemoteKeyboardState {
             } => {
                 let transition = KeyTransition {
                     key: *key,
+                    physical_key: *physical_key,
                     pressed: *pressed,
                 };
                 let Some(index) = clipboard_key_index(*key) else {
@@ -51,6 +54,7 @@ impl RemoteKeyboardState {
                     vec![
                         KeyTransition {
                             key: *key,
+                            physical_key: *physical_key,
                             pressed: true,
                         },
                         transition,
@@ -68,7 +72,11 @@ impl RemoteKeyboardState {
         if std::mem::replace(&mut self.clipboard_keys_down[index], true) {
             Vec::new()
         } else {
-            vec![KeyTransition { key, pressed: true }]
+            vec![KeyTransition {
+                key,
+                physical_key: Some(key),
+                pressed: true,
+            }]
         }
     }
 }
@@ -185,6 +193,74 @@ pub fn is_extended_scancode(scancode: i32) -> bool {
     )
 }
 
+/// Maps any character to `(scancode, is_extended, needs_shift)` for remote view keyboard input.
+pub fn char_to_scancode(ch: char) -> Option<(i32, bool, bool)> {
+    match ch {
+        'a'..='z' => {
+            let idx = (ch as u8 - b'a') as usize;
+            let codes = [
+                0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+            ];
+            Some((codes[idx], false, false))
+        }
+        'A'..='Z' => {
+            let idx = (ch as u8 - b'A') as usize;
+            let codes = [
+                0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+                0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C,
+            ];
+            Some((codes[idx], false, true))
+        }
+        '1' => Some((0x02, false, false)),
+        '!' => Some((0x02, false, true)),
+        '2' => Some((0x03, false, false)),
+        '@' => Some((0x03, false, true)),
+        '3' => Some((0x04, false, false)),
+        '#' => Some((0x04, false, true)),
+        '4' => Some((0x05, false, false)),
+        '$' => Some((0x05, false, true)),
+        '5' => Some((0x06, false, false)),
+        '%' => Some((0x06, false, true)),
+        '6' => Some((0x07, false, false)),
+        '^' => Some((0x07, false, true)),
+        '7' => Some((0x08, false, false)),
+        '&' => Some((0x08, false, true)),
+        '8' => Some((0x09, false, false)),
+        '*' => Some((0x09, false, true)),
+        '9' => Some((0x0A, false, false)),
+        '(' => Some((0x0A, false, true)),
+        '0' => Some((0x0B, false, false)),
+        ')' => Some((0x0B, false, true)),
+        '-' => Some((0x0C, false, false)),
+        '_' => Some((0x0C, false, true)),
+        '=' => Some((0x0D, false, false)),
+        '+' => Some((0x0D, false, true)),
+        '[' => Some((0x1A, false, false)),
+        '{' => Some((0x1A, false, true)),
+        ']' => Some((0x1B, false, false)),
+        '}' => Some((0x1B, false, true)),
+        '\\' => Some((0x2B, false, false)),
+        '|' => Some((0x2B, false, true)),
+        ';' => Some((0x27, false, false)),
+        ':' => Some((0x27, false, true)),
+        '\'' => Some((0x28, false, false)),
+        '"' => Some((0x28, false, true)),
+        '`' => Some((0x29, false, false)),
+        '~' => Some((0x29, false, true)),
+        ',' => Some((0x33, false, false)),
+        '<' => Some((0x33, false, true)),
+        '.' => Some((0x34, false, false)),
+        '>' => Some((0x34, false, true)),
+        '/' => Some((0x35, false, false)),
+        '?' => Some((0x35, false, true)),
+        ' ' => Some((0x39, false, false)),
+        '\n' | '\r' => Some((0x1C, false, false)),
+        '\t' => Some((0x0F, false, false)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,6 +284,7 @@ mod tests {
             state.transitions(&egui::Event::Copy),
             vec![KeyTransition {
                 key: Key::C,
+                physical_key: Some(Key::C),
                 pressed: true,
             }]
         );
@@ -215,6 +292,7 @@ mod tests {
             state.transitions(&key_event(Key::C, false, Modifiers::CTRL)),
             vec![KeyTransition {
                 key: Key::C,
+                physical_key: Some(Key::C),
                 pressed: false,
             }]
         );
@@ -228,6 +306,7 @@ mod tests {
             state.transitions(&egui::Event::Paste("clipboard text".into())),
             vec![KeyTransition {
                 key: Key::V,
+                physical_key: Some(Key::V),
                 pressed: true,
             }]
         );
@@ -235,6 +314,7 @@ mod tests {
             state.transitions(&key_event(Key::V, false, Modifiers::CTRL)),
             vec![KeyTransition {
                 key: Key::V,
+                physical_key: Some(Key::V),
                 pressed: false,
             }]
         );
@@ -249,10 +329,12 @@ mod tests {
             vec![
                 KeyTransition {
                     key: Key::V,
+                    physical_key: Some(Key::V),
                     pressed: true,
                 },
                 KeyTransition {
                     key: Key::V,
+                    physical_key: Some(Key::V),
                     pressed: false,
                 },
             ]
@@ -267,6 +349,7 @@ mod tests {
             state.transitions(&egui::Event::Cut),
             vec![KeyTransition {
                 key: Key::X,
+                physical_key: Some(Key::X),
                 pressed: true,
             }]
         );
@@ -274,6 +357,7 @@ mod tests {
             state.transitions(&key_event(Key::A, true, Modifiers::CTRL)),
             vec![KeyTransition {
                 key: Key::A,
+                physical_key: Some(Key::A),
                 pressed: true,
             }]
         );
@@ -291,18 +375,67 @@ mod tests {
     #[test]
     fn standard_letters_are_not_extended_scancodes() {
         let test_letters = [
-            Key::Q, Key::W, Key::E, Key::R, Key::T, Key::Y, Key::U, Key::I, Key::O, Key::P,
-            Key::A, Key::S, Key::D, Key::F, Key::G, Key::H, Key::J, Key::K, Key::L,
-            Key::Z, Key::X, Key::C, Key::V, Key::B, Key::N, Key::M,
+            Key::Q,
+            Key::W,
+            Key::E,
+            Key::R,
+            Key::T,
+            Key::Y,
+            Key::U,
+            Key::I,
+            Key::O,
+            Key::P,
+            Key::A,
+            Key::S,
+            Key::D,
+            Key::F,
+            Key::G,
+            Key::H,
+            Key::J,
+            Key::K,
+            Key::L,
+            Key::Z,
+            Key::X,
+            Key::C,
+            Key::V,
+            Key::B,
+            Key::N,
+            Key::M,
         ];
         for letter in test_letters {
             if let Some((scancode, _)) = egui_key_to_scancode(letter) {
                 assert!(
                     !is_extended_scancode(scancode),
                     "Letter {:?} with scancode 0x{:02X} must not be marked as extended scancode",
-                    letter, scancode
+                    letter,
+                    scancode
                 );
             }
         }
+    }
+
+    #[test]
+    fn char_to_scancode_maps_exclamation_curly_braces_and_symbols() {
+        assert_eq!(char_to_scancode('!'), Some((0x02, false, true)));
+        assert_eq!(char_to_scancode('{'), Some((0x1A, false, true)));
+        assert_eq!(char_to_scancode('}'), Some((0x1B, false, true)));
+        assert_eq!(char_to_scancode('@'), Some((0x03, false, true)));
+        assert_eq!(char_to_scancode('#'), Some((0x04, false, true)));
+        assert_eq!(char_to_scancode('$'), Some((0x05, false, true)));
+        assert_eq!(char_to_scancode('%'), Some((0x06, false, true)));
+        assert_eq!(char_to_scancode('^'), Some((0x07, false, true)));
+        assert_eq!(char_to_scancode('&'), Some((0x08, false, true)));
+        assert_eq!(char_to_scancode('*'), Some((0x09, false, true)));
+        assert_eq!(char_to_scancode('('), Some((0x0A, false, true)));
+        assert_eq!(char_to_scancode(')'), Some((0x0B, false, true)));
+        assert_eq!(char_to_scancode('_'), Some((0x0C, false, true)));
+        assert_eq!(char_to_scancode('+'), Some((0x0D, false, true)));
+        assert_eq!(char_to_scancode(':'), Some((0x27, false, true)));
+        assert_eq!(char_to_scancode('"'), Some((0x28, false, true)));
+        assert_eq!(char_to_scancode('~'), Some((0x29, false, true)));
+        assert_eq!(char_to_scancode('|'), Some((0x2B, false, true)));
+        assert_eq!(char_to_scancode('<'), Some((0x33, false, true)));
+        assert_eq!(char_to_scancode('>'), Some((0x34, false, true)));
+        assert_eq!(char_to_scancode('?'), Some((0x35, false, true)));
     }
 }

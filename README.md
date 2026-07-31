@@ -6,6 +6,7 @@
 
 | Client | Platform | UI |
 |--------|----------|-----|
+| iOS app | iOS 15.0+ | Swift + SwiftUI (C FFI Bridge) |
 | Android app | Android 8+ (API 26+) | Kotlin + Jetpack Compose |
 | Desktop app | Linux | Rust + egui / eframe |
 
@@ -17,7 +18,8 @@ Protocols: **Microsoft RDP** (via [IronRDP](https://github.com/Devolutions/IronR
 
 - RDP and VNC sessions from one codebase
 - Shared Rust backend for connection, decoding, mouse, and keyboard
-- Connection files (`.rdp` / `.vnc`) open/save on both clients
+- Connection files (`.rdp` / `.vnc`) open/save across clients
+- iOS: SwiftUI responsive interface, touch gestures, trackpad mode, soft keyboard, Ctrl+Alt+Del shortcut
 - Android: touch gestures, soft keyboard helpers, fullscreen remote view
 - Desktop Linux: menu bar, toolbar, connection panel, zoom, fullscreen, native file dialogs
 
@@ -30,12 +32,21 @@ rust-rdp/
 ├── rust_rdp/          # Shared Rust library (RDP/VNC core)
 │   └── src/
 │       ├── lib.rs     # Session API
-│       ├── callback.rs
-│       └── android_jni.rs   # JNI bridge (feature = "android")
+      ├── callback.rs
+│       ├── c_ffi.rs       # C ABI bridge for iOS / Swift
+│       └── android_jni.rs # JNI bridge (feature = "android")
+├── ios/               # iOS Application (SwiftUI + Xcode)
+│   ├── RustRdpVnc/
+│   │   ├── Bridge/    # C FFI Bridging Headers & RdpClient.swift wrapper
+│   │   ├── Models/    # ConnectionProfile model
+│   │   ├── Views/     # SwiftUI Views (Form, Canvas, Bookmarks, Settings)
+│   │   └── Resources/ # Info.plist
+│   └── RustRdpVnc.xcodeproj
 ├── android/           # Android application
 ├── desktop/           # Linux desktop application
 │   ├── assets/        # Icons + .desktop entry
 │   └── src/
+├── build-ios.sh       # iOS build script (Rust static lib + Xcode)
 ├── build-dev.sh       # Android debug APK
 ├── build-release.sh   # Android release APK
 ├── build-desktop.sh   # Linux desktop binary
@@ -65,6 +76,23 @@ Cargo workspace members: `rust_rdp`, `desktop`.
 - OpenGL / EGL (or Vulkan depending on eframe backend)
 - Typical GUI stack: X11 or Wayland, `libxkbcommon`, etc.
 - Optional: `rfd` file dialogs use the portal / GTK stack on most distros
+
+---
+
+## Build — iOS
+
+```bash
+# Build Rust static library for iOS
+./build-ios.sh release aarch64-apple-ios
+
+# Build for iOS Simulator
+./build-ios.sh release aarch64-apple-ios-sim
+```
+
+To build the iOS `.app` or deploy to a device on macOS, open the Xcode project:
+```bash
+open ios/RustRdpVnc.xcodeproj
+```
 
 ---
 

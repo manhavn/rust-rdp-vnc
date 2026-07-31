@@ -1,0 +1,252 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 54;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A11100012B00000000000001 /* RustRdpVncApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100012B00000000000001 /* RustRdpVncApp.swift */; };
+		A11100022B00000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100022B00000000000002 /* ContentView.swift */; };
+		A11100032B00000000000003 /* ConnectionFormView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100032B00000000000003 /* ConnectionFormView.swift */; };
+		A11100042B00000000000004 /* RemoteCanvasView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100042B00000000000004 /* RemoteCanvasView.swift */; };
+		A11100052B00000000000005 /* SavedConnectionsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100052B00000000000005 /* SavedConnectionsView.swift */; };
+		A11100062B00000000000006 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100062B00000000000006 /* SettingsView.swift */; };
+		A11100072B00000000000007 /* ConnectionProfile.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100072B00000000000007 /* ConnectionProfile.swift */; };
+		A11100082B00000000000008 /* RdpClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = F11100082B00000000000008 /* RdpClient.swift */; };
+		A11100092B00000000000009 /* librust_rdp.a in Frameworks */ = {isa = PBXBuildFile; fileRef = F11100092B00000000000009 /* librust_rdp.a */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		B11100012B00000000000001 /* RustRdpVnc.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = RustRdpVnc.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F11100012B00000000000001 /* RustRdpVncApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RustRdpVncApp.swift; sourceTree = "<group>"; };
+		F11100022B00000000000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ContentView.swift; sourceTree = "<group>"; };
+		F11100032B00000000000003 /* ConnectionFormView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/ConnectionFormView.swift; sourceTree = "<group>"; };
+		F11100042B00000000000004 /* RemoteCanvasView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/RemoteCanvasView.swift; sourceTree = "<group>"; };
+		F11100052B00000000000005 /* SavedConnectionsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SavedConnectionsView.swift; sourceTree = "<group>"; };
+		F11100062B00000000000006 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/SettingsView.swift; sourceTree = "<group>"; };
+		F11100072B00000000000007 /* ConnectionProfile.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models/ConnectionProfile.swift; sourceTree = "<group>"; };
+		F11100082B00000000000008 /* RdpClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Bridge/RdpClient.swift; sourceTree = "<group>"; };
+		F11100092B00000000000009 /* RustRdpBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge/RustRdpBridge.h; sourceTree = "<group>"; };
+		F111000A2B0000000000000A /* RustRdpBridge-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = Bridge/RustRdpBridge-Bridging-Header.h; sourceTree = "<group>"; };
+		F111000B2B0000000000000B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = "<group>"; };
+		F11100092B00000000000009 /* librust_rdp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; name = librust_rdp.a; path = ../target/aarch64-apple-ios/release/librust_rdp.a; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		C11100012B00000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11100092B00000000000009 /* librust_rdp.a in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		D11100012B00000000000001 = {
+			isa = PBXGroup;
+			children = (
+				D11100022B00000000000002 /* RustRdpVnc */,
+				D11100032B00000000000003 /* Products */,
+				F11100092B00000000000009 /* librust_rdp.a */,
+			);
+			sourceTree = "<group>";
+		};
+		D11100022B00000000000002 /* RustRdpVnc */ = {
+			isa = PBXGroup;
+			children = (
+				F11100012B00000000000001 /* RustRdpVncApp.swift */,
+				F11100022B00000000000002 /* ContentView.swift */,
+				F11100032B00000000000003 /* ConnectionFormView.swift */,
+				F11100042B00000000000004 /* RemoteCanvasView.swift */,
+				F11100052B00000000000005 /* SavedConnectionsView.swift */,
+				F11100062B00000000000006 /* SettingsView.swift */,
+				F11100072B00000000000007 /* ConnectionProfile.swift */,
+				F11100082B00000000000008 /* RdpClient.swift */,
+				F11100092B00000000000009 /* RustRdpBridge.h */,
+				F111000A2B0000000000000A /* RustRdpBridge-Bridging-Header.h */,
+				F111000B2B0000000000000B /* Info.plist */,
+			);
+			path = RustRdpVnc;
+			sourceTree = "<group>";
+		};
+		D11100032B00000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B11100012B00000000000001 /* RustRdpVnc.app */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		E11100012B00000000000001 /* RustRdpVnc */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E11100022B00000000000002 /* Build configuration list for PBXNativeTarget "RustRdpVnc" */;
+			buildPhases = (
+				S11100012B00000000000001 /* Sources */,
+				C11100012B00000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = RustRdpVnc;
+			productName = RustRdpVnc;
+			productReference = B11100012B00000000000001 /* RustRdpVnc.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		P11100012B00000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					E11100012B00000000000001 = {
+						CreatedOnToolsVersion = 15.0;
+					};
+				};
+			};
+			buildConfigurationList = P11100022B00000000000002 /* Build configuration list for PBXProject "RustRdpVnc" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = D11100012B00000000000001;
+			productRefGroup = D11100032B00000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				E11100012B00000000000001 /* RustRdpVnc */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		S11100012B00000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11100012B00000000000001 /* RustRdpVncApp.swift in Sources */,
+				A11100022B00000000000002 /* ContentView.swift in Sources */,
+				A11100032B00000000000003 /* ConnectionFormView.swift in Sources */,
+				A11100042B00000000000004 /* RemoteCanvasView.swift in Sources */,
+				A11100052B00000000000005 /* SavedConnectionsView.swift in Sources */,
+				A11100062B00000000000006 /* SettingsView.swift in Sources */,
+				A11100072B00000000000007 /* ConnectionProfile.swift in Sources */,
+				A11100082B00000000000008 /* RdpClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		BC1100012B00000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/RustRdpVnc/Bridge",
+				);
+				INFOPLIST_FILE = RustRdpVnc/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../target/aarch64-apple-ios/debug",
+					"$(PROJECT_DIR)/../target/aarch64-apple-ios-sim/debug",
+					"$(PROJECT_DIR)/../target/aarch64-apple-ios/release",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rustai.rdp.RustRdpVnc;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_BRIDGING_HEADER = "RustRdpVnc/Bridge/RustRdpBridge-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		BC1100022B00000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = NO;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/RustRdpVnc/Bridge",
+				);
+				INFOPLIST_FILE = RustRdpVnc/Resources/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(PROJECT_DIR)/../target/aarch64-apple-ios/release",
+					"$(PROJECT_DIR)/../target/aarch64-apple-ios-sim/release",
+				);
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.rustai.rdp.RustRdpVnc;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_BRIDGING_HEADER = "RustRdpVnc/Bridge/RustRdpBridge-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		PC1100012B00000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = iphoneos;
+			};
+			name = Debug;
+		};
+		PC1100022B00000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				SDKROOT = iphoneos;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		E11100022B00000000000002 /* Build configuration list for PBXNativeTarget "RustRdpVnc" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				BC1100012B00000000000001 /* Debug */,
+				BC1100022B00000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		P11100022B00000000000002 /* Build configuration list for PBXProject "RustRdpVnc" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				PC1100012B00000000000001 /* Debug */,
+				PC1100022B00000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = P11100012B00000000000001 /* Project object */;
+}
