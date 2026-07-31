@@ -37,6 +37,11 @@ class RdpViewModel : RdpClient.Callback {
     var domain by mutableStateOf("")
     var connectionMode by mutableStateOf("RDP")
 
+    var cursorType by mutableStateOf(0)
+    var cursorBitmap: Bitmap? by mutableStateOf(null)
+    var cursorHotX by mutableStateOf(0)
+    var cursorHotY by mutableStateOf(0)
+
     fun initBitmap(width: Int, height: Int) {
         screenWidth = width
         screenHeight = height
@@ -78,6 +83,26 @@ class RdpViewModel : RdpClient.Callback {
     override fun onResolutionChanged(width: Int, height: Int) {
         CoroutineScope(Dispatchers.Main).launch {
             initBitmap(width, height)
+        }
+    }
+
+    override fun onCursorChanged(cursorType: Int) {
+        if (cursorType == 0 || cursorType == 1) {
+            this.cursorBitmap = null
+        }
+        this.cursorType = cursorType
+    }
+
+    override fun onCursorBitmap(width: Int, height: Int, hotX: Int, hotY: Int, pixels: IntArray) {
+        try {
+            if (width > 0 && height > 0 && pixels.size >= width * height) {
+                val bmp = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+                this.cursorBitmap = bmp
+                this.cursorHotX = hotX
+                this.cursorHotY = hotY
+            }
+        } catch (e: Exception) {
+            Log.e("RdpViewModel", "Error creating cursor bitmap: ${e.message}")
         }
     }
 }

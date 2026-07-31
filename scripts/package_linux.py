@@ -16,7 +16,7 @@ def package_linux(target_dir, target_name):
         arch = "arm64"
         rpm_arch = "aarch64"
 
-    pkg_name = f"rust-rdp-vnc_1.0.5_{target_name}"
+    pkg_name = f"rust-rdp-vnc_1.0.6_{target_name}"
     pkg_dir = os.path.abspath(os.path.join(target_dir, pkg_name))
     if os.path.exists(pkg_dir):
         shutil.rmtree(pkg_dir)
@@ -57,7 +57,7 @@ def package_linux(target_dir, target_name):
 
     # 5. DEBIAN/control
     control_content = f"""Package: rust-rdp-vnc
-Version: 1.0.5
+Version: 1.0.6
 Section: utils
 Priority: optional
 Architecture: {arch}
@@ -69,7 +69,7 @@ Description: Rust RDP VNC Desktop Client
         f.write(control_content)
 
     # 6. Build .deb
-    deb_file = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc_1.0.5_{target_name}.deb"))
+    deb_file = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc_1.0.6_{target_name}.deb"))
     res = subprocess.run(["dpkg-deb", "-b", pkg_dir, deb_file], capture_output=True, text=True)
     if res.returncode == 0:
         print(f"  ✓ Created Linux .deb package: {deb_file}")
@@ -77,7 +77,7 @@ Description: Rust RDP VNC Desktop Client
         print(f"  [!] Failed to create .deb: {res.stderr}")
 
     # 7. Build .rpm using cargo-generate-rpm or rpmbuild
-    rpm_file = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc-1.0.5-1.{target_name}.rpm"))
+    rpm_file = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc-1.0.6-1.{target_name}.rpm"))
     cargo_rpm = shutil.which("cargo-generate-rpm") or os.path.expanduser("~/.cargo/bin/cargo-generate-rpm")
 
     if os.path.exists(cargo_rpm):
@@ -108,7 +108,7 @@ Description: Rust RDP VNC Desktop Client
         print("  [!] cargo-generate-rpm not found, skipping .rpm packaging")
 
     # 8. Create tar.gz archive
-    tar_base = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc-1.0.5-{target_name}"))
+    tar_base = os.path.abspath(os.path.join(target_dir, f"rust-rdp-vnc-1.0.6-{target_name}"))
     shutil.make_archive(tar_base, "gztar", pkg_dir, "usr")
     print(f"  ✓ Created Linux .tar.gz distribution: {tar_base}.tar.gz")
 

@@ -1097,9 +1097,14 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var lastMouseY by remember { mutableStateOf(0) }
     var cursorX by remember { mutableStateOf(viewModel.screenWidth / 2f) }
     var cursorY by remember { mutableStateOf(viewModel.screenHeight / 2f) }
+    val context = LocalContext.current
+    val sharedPrefs = remember { context.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE) }
     var pendingWheelDeltaY by remember { mutableStateOf(0f) }
     var pendingWheelDeltaX by remember { mutableStateOf(0f) }
     var isMouseHeld by remember { mutableStateOf(false) }
+    var isHoverThrottleEnabled by remember { mutableStateOf(sharedPrefs.getBoolean("isHoverThrottleEnabled", false)) }
+    var hoverIntervalMs by remember { mutableStateOf(sharedPrefs.getLong("hoverIntervalMs", 1000L)) }
+    var lastMouseSendTime by remember { mutableStateOf(0L) }
     var isToolbarVisible by remember { mutableStateOf(true) }
     var dotOffsetX by remember { mutableStateOf(0f) }
     var dotOffsetY by remember { mutableStateOf(0f) }
@@ -1582,7 +1587,17 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                                         followCursor()
                                         lastMouseX = nextMouseX
                                         lastMouseY = nextMouseY
-                                        RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 0) // Move
+                                        val now = System.currentTimeMillis()
+                                        if (isHoverThrottleEnabled && !isMouseHeld) {
+                                            val minInterval = hoverIntervalMs.coerceIn(50L, 1000L)
+                                            if (now - lastMouseSendTime >= minInterval) {
+                                                RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 0) // Move
+                                                lastMouseSendTime = now
+                                            }
+                                        } else {
+                                            RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 0) // Move
+                                            lastMouseSendTime = now
+                                        }
                                     }
                                     change.consume()
                                 }
@@ -1612,16 +1627,93 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                         val cursorCanvasX = drawLeft + (cursorX / viewModel.screenWidth.toFloat()) * drawWidth
                         val cursorCanvasY = drawTop + (cursorY / viewModel.screenHeight.toFloat()) * drawHeight
                         
-                        // Default Arrow Cursor
-                        val cursorPath = Path().apply {
-                            moveTo(cursorCanvasX, cursorCanvasY)
-                            lineTo(cursorCanvasX, cursorCanvasY + 20f / scale)
-                            lineTo(cursorCanvasX + 5f / scale, cursorCanvasY + 15f / scale)
-                            lineTo(cursorCanvasX + 12f / scale, cursorCanvasY + 15f / scale)
-                            close()
+                        // Custom RDP Cursor Bitmap or Vector Cursor Shape
+                        viewModel.cursorBitmap?.let { customBmp ->
+                            val hotX = viewModel.cursorHotX
+                            val hotY = viewModel.cursorHotY
+                            val bmpWidth = customBmp.width.toFloat()
+                            val bmpHeight = customBmp.height.toFloat()
+
+                            val curLeft = cursorCanvasX - (hotX / viewModel.screenWidth.toFloat()) * drawWidth
+                            val curTop = cursorCanvasY - (hotY / viewModel.screenHeight.toFloat()) * drawHeight
+                            val curWidth = (bmpWidth / viewModel.screenWidth.toFloat()) * drawWidth
+                            val curHeight = (bmpHeight / viewModel.screenHeight.toFloat()) * drawHeight
+
+                            drawImage(
+                                image = customBmp.asImageBitmap(),
+                                dstOffset = IntOffset(curLeft.roundToInt(), curTop.roundToInt()),
+                                dstSize = IntSize(curWidth.roundToInt().coerceAtLeast(1), curHeight.roundToInt().coerceAtLeast(1))
+                            )
+                        } ?: run {
+                            when (viewModel.cursorType) {
+                                2 -> { // Text I-Beam
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX - 3f / scale, cursorCanvasY - 8f / scale)
+                                        lineTo(cursorCanvasX + 3f / scale, cursorCanvasY - 8f / scale)
+                                        moveTo(cursorCanvasX, cursorCanvasY - 8f / scale)
+                                        lineTo(cursorCanvasX, cursorCanvasY + 8f / scale)
+                                        moveTo(cursorCanvasX - 3f / scale, cursorCanvasY + 8f / scale)
+                                        lineTo(cursorCanvasX + 3f / scale, cursorCanvasY + 8f / scale)
+                                    }
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 3f / scale))
+                                    drawPath(p, color = Color.White, style = Stroke(width = 1.5f / scale))
+                                }
+                                3 -> { // Pointing Hand
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX, cursorCanvasY)
+                                        lineTo(cursorCanvasX + 4f / scale, cursorCanvasY + 4f / scale)
+                                        lineTo(cursorCanvasX + 2f / scale, cursorCanvasY + 12f / scale)
+                                        lineTo(cursorCanvasX - 4f / scale, cursorCanvasY + 12f / scale)
+                                        close()
+                                    }
+                                    drawPath(p, color = Color.White)
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 1f / scale))
+                                }
+                                4 -> { // Resize NW-SE
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX - 6f / scale, cursorCanvasY - 6f / scale)
+                                        lineTo(cursorCanvasX + 6f / scale, cursorCanvasY + 6f / scale)
+                                    }
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 3f / scale))
+                                    drawPath(p, color = Color.White, style = Stroke(width = 1.5f / scale))
+                                }
+                                5 -> { // Resize NE-SW
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX + 6f / scale, cursorCanvasY - 6f / scale)
+                                        lineTo(cursorCanvasX - 6f / scale, cursorCanvasY + 6f / scale)
+                                    }
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 3f / scale))
+                                    drawPath(p, color = Color.White, style = Stroke(width = 1.5f / scale))
+                                }
+                                6 -> { // Resize EW
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX - 8f / scale, cursorCanvasY)
+                                        lineTo(cursorCanvasX + 8f / scale, cursorCanvasY)
+                                    }
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 3f / scale))
+                                    drawPath(p, color = Color.White, style = Stroke(width = 1.5f / scale))
+                                }
+                                7 -> { // Resize NS
+                                    val p = Path().apply {
+                                        moveTo(cursorCanvasX, cursorCanvasY - 8f / scale)
+                                        lineTo(cursorCanvasX, cursorCanvasY + 8f / scale)
+                                    }
+                                    drawPath(p, color = Color.Black, style = Stroke(width = 3f / scale))
+                                    drawPath(p, color = Color.White, style = Stroke(width = 1.5f / scale))
+                                }
+                                else -> { // Default Arrow (0)
+                                    val cursorPath = Path().apply {
+                                        moveTo(cursorCanvasX, cursorCanvasY)
+                                        lineTo(cursorCanvasX, cursorCanvasY + 20f / scale)
+                                        lineTo(cursorCanvasX + 5f / scale, cursorCanvasY + 15f / scale)
+                                        lineTo(cursorCanvasX + 12f / scale, cursorCanvasY + 15f / scale)
+                                        close()
+                                    }
+                                    drawPath(cursorPath, color = Color.White)
+                                    drawPath(cursorPath, color = Color.Black, style = Stroke(width = 1f / scale))
+                                }
+                            }
                         }
-                        drawPath(cursorPath, color = Color.White)
-                        drawPath(cursorPath, color = Color.Black, style = Stroke(width = 1f / scale))
                     }
                 }
             }
@@ -1694,6 +1786,46 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             },
                             color = MaterialTheme.colorScheme.primary,
                             fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Button(
+                        onClick = {
+                            if (!isHoverThrottleEnabled) {
+                                isHoverThrottleEnabled = true
+                                hoverIntervalMs = 50L
+                            } else {
+                                when (hoverIntervalMs) {
+                                    50L -> hoverIntervalMs = 100L
+                                    100L -> hoverIntervalMs = 250L
+                                    250L -> hoverIntervalMs = 500L
+                                    500L -> hoverIntervalMs = 1000L
+                                    else -> {
+                                        isHoverThrottleEnabled = false
+                                        hoverIntervalMs = 1000L
+                                    }
+                                }
+                            }
+                            sharedPrefs.edit().apply {
+                                putBoolean("isHoverThrottleEnabled", isHoverThrottleEnabled)
+                                putLong("hoverIntervalMs", hoverIntervalMs)
+                                apply()
+                            }
+                        },
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                        shape = RoundedCornerShape(6.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isHoverThrottleEnabled) Color(0xFF334155) else Color.Transparent
+                        ),
+                        modifier = Modifier.height(32.dp),
+                    ) {
+                        Text(
+                            text = if (isHoverThrottleEnabled) "${hoverIntervalMs}ms" else "Realtime",
+                            color = if (isHoverThrottleEnabled) Color(0xFF38BDF8) else Color.Gray,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     }
