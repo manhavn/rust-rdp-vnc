@@ -10,7 +10,25 @@ use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, Server
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
+
+static DISABLE_RUST_LOG: AtomicBool = AtomicBool::new(false);
+
+pub fn set_disable_rust_log(disable: bool) {
+    DISABLE_RUST_LOG.store(disable, AtomicOrdering::Relaxed);
+}
+
+pub fn is_rust_log_disabled() -> bool {
+    DISABLE_RUST_LOG.load(AtomicOrdering::Relaxed)
+}
+
+pub fn set_disable_frame_complete_log(disable: bool) {
+    set_disable_rust_log(disable);
+}
+
+pub fn is_frame_complete_log_disabled() -> bool {
+    is_rust_log_disabled()
+}
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -45,7 +63,10 @@ use ironrdp_pdu::surface_commands::SurfaceCommand;
 use ironrdp_pdu::{Action, Decode, ReadCursor, WriteBuf};
 use ironrdp_tokio::{split_tokio_framed, TokioFramed};
 
-use callback::{notify_resolution_change, notify_state_change, push_frame};
+use callback::{
+    notify_cursor_bitmap, notify_cursor_change, notify_resolution_change, notify_state_change,
+    push_frame,
+};
 
 enum SessionType {
     Rdp {
@@ -1427,7 +1448,7 @@ pub fn connect_session(
                                 license_cache: None,
                                 timezone_info: ironrdp_pdu::rdp::client_info::TimezoneInfo::default(),
                                 compression_type: None, // NO BULK COMPRESSION to avoid needing NCRUSH decompressors
-                                enable_server_pointer: false,
+                                enable_server_pointer: true,
                                 pointer_software_rendering: false,
                                 multitransport_flags: None,
                             };
@@ -1604,6 +1625,7 @@ pub fn connect_session(
                     let mut screen_pixels = vec![0i32; (width * height) as usize];
                     let mut rdp6_decoder = BitmapStreamDecoder::default();
                     let mut decompressed_buf = Vec::new();
+                    let mut pointer_cache: [Option<CursorCacheEntry>; 32] = Default::default();
 
                     notify_state_change(callback_reader.as_ref(), 2, "[Rust Log] Reader loop started");
                     while *active_reader.lock().unwrap() {
@@ -1708,6 +1730,103 @@ pub fn connect_session(
                                                             }
                                                         }
                                                         push_frame(callback_reader.as_ref(), &screen_pixels, width, height);
+                                                    }
+                                                    FastPathUpdate::Pointer(p) => {
+                                                        match p {
+                                                            ironrdp_pdu::pointer::PointerUpdateData::SetDefault => {
+                                                                notify_cursor_change(callback_reader.as_ref(), 0);
+                                                            }
+                                                            ironrdp_pdu::pointer::PointerUpdateData::SetHidden => {
+                                                                notify_cursor_change(callback_reader.as_ref(), 1);
+                                                            }
+                                                            ironrdp_pdu::pointer::PointerUpdateData::SetPosition(_) => {}
+                                                            ironrdp_pdu::pointer::PointerUpdateData::Color(color_ptr) => {
+                                                                let entry = decode_color_pointer_rgba(
+                                                                    color_ptr.width,
+                                                                    color_ptr.height,
+                                                                    color_ptr.hot_spot.x,
+                                                                    color_ptr.hot_spot.y,
+                                                                    24,
+                                                                    color_ptr.xor_mask,
+                                                                    color_ptr.and_mask,
+                                                                );
+                                                                let geom_code = analyze_cursor_bitmap(
+                                                                    color_ptr.width,
+                                                                    color_ptr.height,
+                                                                    color_ptr.hot_spot.x,
+                                                                    color_ptr.hot_spot.y,
+                                                                    color_ptr.and_mask,
+                                                                    color_ptr.xor_mask,
+                                                                );
+                                                                notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                notify_cursor_bitmap(
+                                                                    callback_reader.as_ref(),
+                                                                    entry.width,
+                                                                    entry.height,
+                                                                    entry.hot_x,
+                                                                    entry.hot_y,
+                                                                    &entry.pixels,
+                                                                );
+                                                                let idx = (color_ptr.cache_index as usize) % 32;
+                                                                pointer_cache[idx] = Some(entry);
+                                                            }
+                                                            ironrdp_pdu::pointer::PointerUpdateData::Cached(cached_ptr) => {
+                                                                let idx = (cached_ptr.cache_index as usize) % 32;
+                                                                if let Some(ref entry) = pointer_cache[idx] {
+                                                                    let geom_code = analyze_cursor_bitmap(
+                                                                        entry.width as u16,
+                                                                        entry.height as u16,
+                                                                        entry.hot_x as u16,
+                                                                        entry.hot_y as u16,
+                                                                        &[],
+                                                                        &[],
+                                                                    );
+                                                                    notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                    notify_cursor_bitmap(
+                                                                        callback_reader.as_ref(),
+                                                                        entry.width,
+                                                                        entry.height,
+                                                                        entry.hot_x,
+                                                                        entry.hot_y,
+                                                                        &entry.pixels,
+                                                                    );
+                                                                } else {
+                                                                    notify_cursor_change(callback_reader.as_ref(), 0);
+                                                                }
+                                                            }
+                                                            ironrdp_pdu::pointer::PointerUpdateData::New(new_ptr) => {
+                                                                let cp = &new_ptr.color_pointer;
+                                                                let entry = decode_color_pointer_rgba(
+                                                                    cp.width,
+                                                                    cp.height,
+                                                                    cp.hot_spot.x,
+                                                                    cp.hot_spot.y,
+                                                                    new_ptr.xor_bpp,
+                                                                    cp.xor_mask,
+                                                                    cp.and_mask,
+                                                                );
+                                                                let geom_code = analyze_cursor_bitmap(
+                                                                    cp.width,
+                                                                    cp.height,
+                                                                    cp.hot_spot.x,
+                                                                    cp.hot_spot.y,
+                                                                    cp.and_mask,
+                                                                    cp.xor_mask,
+                                                                );
+                                                                notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                notify_cursor_bitmap(
+                                                                    callback_reader.as_ref(),
+                                                                    entry.width,
+                                                                    entry.height,
+                                                                    entry.hot_x,
+                                                                    entry.hot_y,
+                                                                    &entry.pixels,
+                                                                );
+                                                                let idx = (cp.cache_index as usize) % 32;
+                                                                pointer_cache[idx] = Some(entry);
+                                                            }
+                                                            _ => {}
+                                                        }
                                                     }
                                                     _ => {}
                                                 }
@@ -2148,6 +2267,217 @@ pub fn send_scancode_event(scancode: i32, is_extended: bool, pressed: i32) {
             }
         }
     });
+}
+
+#[derive(Clone)]
+struct CursorCacheEntry {
+    width: i32,
+    height: i32,
+    hot_x: i32,
+    hot_y: i32,
+    pixels: Vec<i32>,
+}
+
+fn decode_color_pointer_rgba(
+    width: u16,
+    height: u16,
+    hot_x: u16,
+    hot_y: u16,
+    bpp: u16,
+    xor_mask: &[u8],
+    and_mask: &[u8],
+) -> CursorCacheEntry {
+    let w = width as usize;
+    let h = height as usize;
+    let mut pixels = vec![0i32; w * h];
+    if w == 0 || h == 0 {
+        return CursorCacheEntry {
+            width: width as i32,
+            height: height as i32,
+            hot_x: hot_x as i32,
+            hot_y: hot_y as i32,
+            pixels,
+        };
+    }
+
+    let and_row_bytes = ((w + 31) / 32) * 4;
+    let bpp_bytes = if bpp > 0 { (bpp as usize) / 8 } else { 3 };
+    let bpp_bytes = bpp_bytes.max(1);
+    let xor_row_bytes = ((w * bpp_bytes + 3) / 4) * 4;
+
+    for y in 0..h {
+        let src_y = h - 1 - y;
+        let and_byte_start = src_y * and_row_bytes;
+        let xor_byte_start = src_y * xor_row_bytes;
+
+        for x in 0..w {
+            let is_transparent = if !and_mask.is_empty() {
+                let byte_idx = and_byte_start + (x / 8);
+                if byte_idx < and_mask.len() {
+                    ((and_mask[byte_idx] >> (7 - (x % 8))) & 1) != 0
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+
+            if is_transparent {
+                pixels[y * w + x] = 0;
+            } else {
+                let p_idx = xor_byte_start + x * bpp_bytes;
+                if p_idx + 2 < xor_mask.len() {
+                    let b = xor_mask[p_idx] as u32;
+                    let g = xor_mask[p_idx + 1] as u32;
+                    let r = xor_mask[p_idx + 2] as u32;
+                    let a = if bpp_bytes >= 4 && p_idx + 3 < xor_mask.len() {
+                        xor_mask[p_idx + 3] as u32
+                    } else {
+                        255
+                    };
+                    let argb = (a << 24) | (r << 16) | (g << 8) | b;
+                    pixels[y * w + x] = argb as i32;
+                } else {
+                    pixels[y * w + x] = 0;
+                }
+            }
+        }
+    }
+
+    CursorCacheEntry {
+        width: width as i32,
+        height: height as i32,
+        hot_x: hot_x as i32,
+        hot_y: hot_y as i32,
+        pixels,
+    }
+}
+
+fn analyze_cursor_bitmap(
+    width: u16,
+    height: u16,
+    hot_x: u16,
+    hot_y: u16,
+    and_mask: &[u8],
+    xor_mask: &[u8],
+) -> i32 {
+    let w = width as usize;
+    let h = height as usize;
+    if w == 0 || h == 0 {
+        return 0;
+    }
+
+    if hot_x <= 2 && hot_y <= 2 {
+        return 0; // Default Arrow
+    }
+
+    let and_row_bytes = ((w + 15) / 16) * 2;
+    let mut min_x = w;
+    let mut max_x = 0;
+    let mut min_y = h;
+    let mut max_y = 0;
+
+    let mut q_top_left = 0;
+    let mut q_top_right = 0;
+    let mut q_bottom_left = 0;
+    let mut q_bottom_right = 0;
+
+    for y in 0..h {
+        for x in 0..w {
+            let is_visible = if !and_mask.is_empty() {
+                let byte_idx = y * and_row_bytes + (x / 8);
+                if byte_idx < and_mask.len() {
+                    let bit = (and_mask[byte_idx] >> (7 - (x % 8))) & 1;
+                    bit == 0
+                } else {
+                    false
+                }
+            } else {
+                let pixel_offset = (y * w + x) * 4;
+                if pixel_offset + 3 < xor_mask.len() {
+                    xor_mask[pixel_offset + 3] > 0
+                } else {
+                    false
+                }
+            };
+
+            if is_visible {
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
+
+                if x < w / 2 && y < h / 2 {
+                    q_top_left += 1;
+                } else if x >= w / 2 && y < h / 2 {
+                    q_top_right += 1;
+                } else if x < w / 2 && y >= h / 2 {
+                    q_bottom_left += 1;
+                } else {
+                    q_bottom_right += 1;
+                }
+            }
+        }
+    }
+
+    if min_x > max_x || min_y > max_y {
+        return 0;
+    }
+
+    let span_x = max_x - min_x + 1;
+    let span_y = max_y - min_y + 1;
+    let total_pixels = q_top_left + q_top_right + q_bottom_left + q_bottom_right;
+
+    if span_y >= 12 && span_x <= 10 && span_y > span_x * 3 / 2 {
+        return 2; // Text I-Beam
+    }
+
+    if span_x >= 12 && span_y <= 12 && span_x > span_y * 3 / 2 {
+        return 6; // Resize EW (Horizontal)
+    }
+
+    if span_y >= 14 && span_x <= 14 && span_y > span_x * 5 / 4 {
+        return 7; // Resize NS (Vertical)
+    }
+
+    let nwse_score = q_top_left + q_bottom_right;
+    let nesw_score = q_top_right + q_bottom_left;
+
+    if nwse_score > nesw_score * 2 && total_pixels >= 10 {
+        return 4; // Resize NWSE
+    }
+
+    if nesw_score > nwse_score * 2 && total_pixels >= 10 {
+        return 5; // Resize NESW
+    }
+
+    if span_x >= 14
+        && span_y >= 14
+        && q_top_left > 2
+        && q_top_right > 2
+        && q_bottom_left > 2
+        && q_bottom_right > 2
+    {
+        return 10; // Move
+    }
+
+    if hot_y <= 4 && hot_x >= 2 {
+        return 3; // Pointing Hand
+    }
+
+    if hot_x <= 2 && hot_y <= 2 {
+        0
+    } else {
+        3
+    }
 }
 
 #[cfg(test)]

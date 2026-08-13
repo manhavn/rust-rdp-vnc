@@ -78,6 +78,38 @@ impl SessionCallback for JniCallback {
             );
         }
     }
+
+    fn on_cursor_changed(&self, cursor_type: i32) {
+        if let Ok(mut env) = self.jvm.attach_current_thread() {
+            let _ = env.call_method(
+                &self.callback,
+                "onCursorChanged",
+                "(I)V",
+                &[jni::objects::JValue::Int(cursor_type)],
+            );
+        }
+    }
+
+    fn on_cursor_bitmap(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, pixels: &[i32]) {
+        if let Ok(mut env) = self.jvm.attach_current_thread() {
+            if let Ok(jarray) = env.new_int_array(pixels.len() as i32) {
+                if env.set_int_array_region(&jarray, 0, pixels).is_ok() {
+                    let _ = env.call_method(
+                        &self.callback,
+                        "onCursorBitmap",
+                        "(IIII[I)V",
+                        &[
+                            jni::objects::JValue::Int(width),
+                            jni::objects::JValue::Int(height),
+                            jni::objects::JValue::Int(hot_x),
+                            jni::objects::JValue::Int(hot_y),
+                            jni::objects::JValue::Object(&jarray),
+                        ],
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[no_mangle]

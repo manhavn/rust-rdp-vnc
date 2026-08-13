@@ -24,6 +24,8 @@ object RdpClient {
         fun onStateChanged(state: Int, message: String)
         fun onFrameDecoded(pixels: IntArray, x: Int, y: Int, width: Int, height: Int)
         fun onResolutionChanged(width: Int, height: Int)
+        fun onCursorChanged(cursorType: Int) {}
+        fun onCursorBitmap(width: Int, height: Int, hotX: Int, hotY: Int, pixels: IntArray) {}
     }
 
     // Initialize Rust backend logging and runtime

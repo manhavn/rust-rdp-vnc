@@ -45,7 +45,7 @@ def package_win(target_dir, target_name):
     iss_content = f"""; Inno Setup Script for Rust RDP VNC
 [Setup]
 AppName=Rust RDP VNC
-AppVersion=1.0.5
+AppVersion=1.0.6
 DefaultDirName={{autopf}}\\Rust RDP VNC
 DefaultGroupName=Rust RDP VNC
 UninstallDisplayIcon={{app}}\\icon.ico

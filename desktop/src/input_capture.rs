@@ -318,7 +318,7 @@ mod linux {
             assert_eq!(evdev_to_scancode(79), None); // KP1
             assert_eq!(evdev_to_scancode(96), None); // KPENTER
             assert_eq!(evdev_to_scancode(98), None); // KPSLASH
-            // Volume Keys
+                                                     // Volume Keys
             assert_eq!(evdev_to_scancode(113), Some((0x20, true)));
             assert_eq!(evdev_to_scancode(114), Some((0x2E, true)));
             assert_eq!(evdev_to_scancode(115), Some((0x30, true)));

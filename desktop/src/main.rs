@@ -117,12 +117,21 @@ impl FrameBuffer {
             let v = *px as u32;
             let a = ((v >> 24) & 0xFF) as u8;
             out[0] = ((v >> 16) & 0xFF) as u8; // R
-            out[1] = ((v >> 8) & 0xFF) as u8;  // G
-            out[2] = (v & 0xFF) as u8;         // B
+            out[1] = ((v >> 8) & 0xFF) as u8; // G
+            out[2] = (v & 0xFF) as u8; // B
             out[3] = if a == 0 { 255 } else { a };
         }
         ColorImage::from_rgba_unmultiplied([w, h], &rgba)
     }
+}
+
+#[derive(Clone)]
+struct CustomCursorData {
+    width: i32,
+    height: i32,
+    hot_x: i32,
+    hot_y: i32,
+    pixels: Vec<i32>,
 }
 
 struct SharedUi {
@@ -130,6 +139,8 @@ struct SharedUi {
     status: Mutex<String>,
     frame: Mutex<FrameBuffer>,
     dirty: AtomicBool,
+    current_cursor: Mutex<egui::CursorIcon>,
+    custom_cursor: Mutex<Option<CustomCursorData>>,
 }
 
 impl SharedUi {
@@ -139,6 +150,8 @@ impl SharedUi {
             status: Mutex::new("Ready".into()),
             frame: Mutex::new(FrameBuffer::new(1280, 720)),
             dirty: AtomicBool::new(false),
+            current_cursor: Mutex::new(egui::CursorIcon::Default),
+            custom_cursor: Mutex::new(None),
         })
     }
 }
@@ -170,6 +183,39 @@ impl SessionCallback for UiCallback {
         self.ui.dirty.store(true, Ordering::Relaxed);
         log::info!("resolution -> {width}x{height}");
     }
+
+    fn on_cursor_changed(&self, cursor_type: i32) {
+        let icon = match cursor_type {
+            0 => egui::CursorIcon::Default,
+            1 => egui::CursorIcon::None,
+            2 => egui::CursorIcon::Text,
+            3 => egui::CursorIcon::PointingHand,
+            4 => egui::CursorIcon::ResizeNwSe,
+            5 => egui::CursorIcon::ResizeNeSw,
+            6 => egui::CursorIcon::ResizeEast,
+            7 => egui::CursorIcon::ResizeNorth,
+            8 => egui::CursorIcon::Wait,
+            9 => egui::CursorIcon::Crosshair,
+            10 => egui::CursorIcon::Move,
+            11 => egui::CursorIcon::NotAllowed,
+            12 => egui::CursorIcon::Grab,
+            13 => egui::CursorIcon::Grabbing,
+            14 => egui::CursorIcon::Help,
+            15 => egui::CursorIcon::Progress,
+            _ => egui::CursorIcon::Default,
+        };
+        *self.ui.current_cursor.lock() = icon;
+    }
+
+    fn on_cursor_bitmap(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, pixels: &[i32]) {
+        *self.ui.custom_cursor.lock() = Some(CustomCursorData {
+            width,
+            height,
+            hot_x,
+            hot_y,
+            pixels: pixels.to_vec(),
+        });
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -192,6 +238,9 @@ struct Prefs {
     mode: String,
     width: String,
     height: String,
+    enable_hover_throttle: bool,
+    hover_send_interval_ms: u64,
+    disable_rust_log: bool,
 }
 
 impl Default for Prefs {
@@ -205,6 +254,9 @@ impl Default for Prefs {
             mode: "RDP".into(),
             width: "1920".into(),
             height: "1080".into(),
+            enable_hover_throttle: false,
+            hover_send_interval_ms: 1000,
+            disable_rust_log: false,
         }
     }
 }
@@ -238,6 +290,13 @@ impl Prefs {
                     "mode" => p.mode = v.to_string(),
                     "width" => p.width = v.to_string(),
                     "height" => p.height = v.to_string(),
+                    "enable_hover_throttle" => p.enable_hover_throttle = v.parse().unwrap_or(false),
+                    "hover_send_interval_ms" => {
+                        p.hover_send_interval_ms = v.parse().unwrap_or(1000)
+                    }
+                    "disable_rust_log" | "disable_frame_complete_log" => {
+                        p.disable_rust_log = v.parse().unwrap_or(false)
+                    }
                     _ => {}
                 }
             }
@@ -254,7 +313,7 @@ impl Prefs {
             let _ = std::fs::create_dir_all(parent);
         }
         let text = format!(
-            "host={}\nport={}\nusername={}\npassword={}\ndomain={}\nmode={}\nwidth={}\nheight={}\n",
+            "host={}\nport={}\nusername={}\npassword={}\ndomain={}\nmode={}\nwidth={}\nheight={}\nenable_hover_throttle={}\nhover_send_interval_ms={}\ndisable_rust_log={}\n",
             self.host,
             self.port,
             self.username,
@@ -262,7 +321,10 @@ impl Prefs {
             self.domain,
             self.mode,
             self.width,
-            self.height
+            self.height,
+            self.enable_hover_throttle,
+            self.hover_send_interval_ms,
+            self.disable_rust_log
         );
         let _ = std::fs::write(path, text);
     }
@@ -476,6 +538,7 @@ impl Prefs {
             mode,
             width,
             height,
+            ..Self::default()
         })
     }
 }
@@ -505,6 +568,7 @@ struct ConnectionTab {
     texture: Option<TextureHandle>,
     last_frame_gen: u64,
     last_mouse: Option<(i32, i32)>,
+    last_mouse_send_time: Option<std::time::Instant>,
     left_down: bool,
     left_down_pos: Option<(i32, i32)>,
     left_down_dragged: bool,
@@ -534,6 +598,7 @@ impl ConnectionTab {
             texture: None,
             last_frame_gen: 0,
             last_mouse: None,
+            last_mouse_send_time: None,
             left_down: false,
             left_down_pos: None,
             left_down_dragged: false,
@@ -616,6 +681,9 @@ struct DesktopApp {
     toast: Option<Toast>,
     /// Tab id waiting for “close while connected?” confirmation (× / Ctrl+W).
     pending_close_tab_id: Option<u64>,
+    enable_hover_throttle: bool,
+    hover_send_interval_ms: u64,
+    disable_rust_log: bool,
 }
 
 /// Small top-center hotspot that reveals the compact Exit control.
@@ -672,7 +740,12 @@ impl DesktopApp {
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
 
-        let first = ConnectionTab::new(1, Prefs::load());
+        let loaded_prefs = Prefs::load();
+        let enable_hover_throttle = loaded_prefs.enable_hover_throttle;
+        let hover_send_interval_ms = loaded_prefs.hover_send_interval_ms;
+        let disable_rust_log = loaded_prefs.disable_rust_log;
+        rust_rdp::set_disable_rust_log(disable_rust_log);
+        let first = ConnectionTab::new(1, loaded_prefs);
         Self {
             tabs: vec![first],
             active_tab: 0,
@@ -690,6 +763,9 @@ impl DesktopApp {
             view_exit_overlay_rect: None,
             toast: None,
             pending_close_tab_id: None,
+            enable_hover_throttle,
+            hover_send_interval_ms,
+            disable_rust_log,
         }
     }
 
@@ -1363,7 +1439,47 @@ impl DesktopApp {
                         ui.close_menu();
                     }
                 });
+
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.disable_rust_log, "Disable [Rust Log]")
+                    .on_hover_text(
+                        "Disable all '[Rust Log]' status messages (frame_id, bitmap updates, PDU logs, etc.)",
+                    )
+                    .changed()
+                {
+                    rust_rdp::set_disable_rust_log(self.disable_rust_log);
+                    self.tab_mut().prefs.disable_rust_log = self.disable_rust_log;
+                    self.tab_mut().prefs.save_app_prefs();
+                }
             });
+
+            let prev_throttle = self.enable_hover_throttle;
+            let prev_interval = self.hover_send_interval_ms;
+            ui.menu_button("Hover Throttle", |ui| {
+                ui.checkbox(&mut self.enable_hover_throttle, "Limit Hover Frequency");
+                if self.enable_hover_throttle {
+                    ui.add(
+                        egui::Slider::new(&mut self.hover_send_interval_ms, 50..=1000)
+                            .step_by(10.0)
+                            .suffix(" ms"),
+                    );
+                    self.hover_send_interval_ms = self.hover_send_interval_ms.clamp(50, 1000);
+                } else {
+                    ui.label(
+                        RichText::new("Mode: Immediate (Real-time)")
+                            .small()
+                            .color(theme::TEXT_DIM),
+                    );
+                }
+            });
+            if self.enable_hover_throttle != prev_throttle
+                || self.hover_send_interval_ms != prev_interval
+            {
+                self.tab_mut().prefs.enable_hover_throttle = self.enable_hover_throttle;
+                self.tab_mut().prefs.hover_send_interval_ms = self.hover_send_interval_ms;
+                self.tab_mut().prefs.save_app_prefs();
+            }
 
             ui.menu_button("Help", |ui| {
                 if ui.button("About Rust RDP VNC").clicked() {
@@ -1641,22 +1757,22 @@ impl DesktopApp {
             None
         };
 
-        ui.add_space(4.0);
+        ui.add_space(2.0);
         ui.label(RichText::new("Connection").strong().size(14.0));
         ui.label(
             RichText::new("Configure the remote session")
                 .small()
                 .color(theme::TEXT_DIM),
         );
-        ui.add_space(8.0);
+        ui.add_space(4.0);
         ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(6.0);
 
         {
             let tab = self.tab_mut();
             egui::Grid::new(format!("conn_grid_{tab_id}"))
                 .num_columns(2)
-                .spacing([12.0, 8.0])
+                .spacing([12.0, 5.0])
                 .min_col_width(80.0)
                 .show(ui, |ui| {
                     ui.label(RichText::new("Protocol").color(theme::TEXT_DIM));
@@ -1714,17 +1830,28 @@ impl DesktopApp {
 
                     ui.label(RichText::new("Password").color(theme::TEXT_DIM));
                     ui.horizontal(|ui| {
-                        let available_w = ui.available_width() - 36.0;
-                        ui.add_enabled(
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        ui.spacing_mut().button_padding.x = 2.0;
+                        ui.spacing_mut().button_padding.y = 0.0;
+                        let text_w = (ui.available_width() - 34.0).max(40.0);
+                        let text_res = ui.add_enabled(
                             !busy,
                             egui::TextEdit::singleline(&mut tab.prefs.password)
                                 .password(!tab.show_password)
-                                .desired_width(available_w.max(60.0)),
+                                .desired_width(text_w),
                         );
+                        let btn_h = text_res.rect.height();
                         let icon = if tab.show_password { "🙈" } else { "👁" };
-                        let tooltip = if tab.show_password { "Hide password" } else { "Show password" };
+                        let tooltip = if tab.show_password {
+                            "Hide password"
+                        } else {
+                            "Show password"
+                        };
                         if ui
-                            .add_enabled(!busy, egui::Button::new(icon))
+                            .add_enabled(
+                                !busy,
+                                egui::Button::new(icon).min_size(egui::vec2(22.0, btn_h)),
+                            )
                             .on_hover_text(tooltip)
                             .clicked()
                         {
@@ -1734,15 +1861,15 @@ impl DesktopApp {
                     ui.end_row();
                 });
 
-            ui.add_space(16.0);
-            ui.label(RichText::new("Display").strong().size(14.0));
-            ui.add_space(6.0);
-            ui.separator();
             ui.add_space(8.0);
+            ui.label(RichText::new("Display").strong().size(14.0));
+            ui.add_space(4.0);
+            ui.separator();
+            ui.add_space(6.0);
 
             egui::Grid::new(format!("display_grid_{tab_id}"))
                 .num_columns(2)
-                .spacing([12.0, 8.0])
+                .spacing([12.0, 5.0])
                 .min_col_width(80.0)
                 .show(ui, |ui| {
                     ui.label(RichText::new("Width").color(theme::TEXT_DIM));
@@ -1760,7 +1887,7 @@ impl DesktopApp {
                     ui.end_row();
                 });
 
-            ui.add_space(6.0);
+            ui.add_space(4.0);
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!busy, |ui| {
                     for (label, w, h) in [
@@ -2086,6 +2213,53 @@ impl DesktopApp {
         );
         let view_fullscreen = self.view_fullscreen;
         let view_focused = response.has_focus() || response.hovered();
+        let custom = self.tab().shared.custom_cursor.lock().clone();
+        if view_focused || view_fullscreen {
+            if custom.is_some() && response.hovered() {
+                ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
+            } else {
+                let cursor = *self.tab().shared.current_cursor.lock();
+                ui.output_mut(|o| o.cursor_icon = cursor);
+            }
+        } else {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
+        }
+
+        if let Some(c) = custom {
+            if let Some(pos) = response.hover_pos() {
+                let cursor_rect = egui::Rect::from_min_size(
+                    pos - egui::vec2(c.hot_x as f32, c.hot_y as f32),
+                    egui::vec2(c.width as f32, c.height as f32),
+                );
+                let color_pixels: Vec<egui::Color32> = c
+                    .pixels
+                    .iter()
+                    .map(|&p| {
+                        let u = p as u32;
+                        let a = ((u >> 24) & 0xFF) as u8;
+                        let r = ((u >> 16) & 0xFF) as u8;
+                        let g = ((u >> 8) & 0xFF) as u8;
+                        let b = (u & 0xFF) as u8;
+                        egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+                    })
+                    .collect();
+                let color_image = egui::ColorImage {
+                    size: [c.width as usize, c.height as usize],
+                    pixels: color_pixels,
+                };
+                let texture = ui.ctx().load_texture(
+                    "custom_cursor",
+                    color_image,
+                    egui::TextureOptions::NEAREST,
+                );
+                ui.painter().image(
+                    texture.id(),
+                    cursor_rect,
+                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
         if connected && (view_focused || view_fullscreen) {
             self.remote_input_active = true;
             let modifiers = ui.input(|i| i.modifiers);
@@ -2111,6 +2285,9 @@ impl DesktopApp {
                         .map(|overlay| overlay.contains(position))
                 })
                 .unwrap_or(false);
+
+        let enable_hover_throttle = self.enable_hover_throttle;
+        let hover_send_interval_ms = self.hover_send_interval_ms;
 
         if let Some(pos) = pointer.filter(|_| !pointer_over_exit) {
             if let Some((x, y)) = self.remote_pos(pos, rect) {
@@ -2138,8 +2315,30 @@ impl DesktopApp {
                 };
 
                 if moved && !is_touchpad_jitter {
-                    send_mouse_event(x, y, 0);
-                    tab.last_mouse = Some((x, y));
+                    let is_hover = !tab.left_down
+                        && !tab.right_down
+                        && !tab.middle_down
+                        && !tab.extra1_down
+                        && !tab.extra2_down;
+                    if enable_hover_throttle && is_hover {
+                        let min_interval = std::time::Duration::from_millis(
+                            hover_send_interval_ms.clamp(50, 1000),
+                        );
+                        let now = std::time::Instant::now();
+                        let can_send = tab
+                            .last_mouse_send_time
+                            .map(|t| now.duration_since(t) >= min_interval)
+                            .unwrap_or(true);
+                        if can_send {
+                            send_mouse_event(x, y, 0);
+                            tab.last_mouse = Some((x, y));
+                            tab.last_mouse_send_time = Some(now);
+                        }
+                    } else {
+                        send_mouse_event(x, y, 0);
+                        tab.last_mouse = Some((x, y));
+                        tab.last_mouse_send_time = Some(std::time::Instant::now());
+                    }
                 }
 
                 let buttons = ui.ctx().input(|i| {
@@ -2681,9 +2880,11 @@ impl eframe::App for DesktopApp {
                             .stroke(egui::Stroke::new(1.0_f32, theme::BORDER)),
                     )
                     .show(ctx, |ui| {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            self.ui_sidebar(ui);
-                        });
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.ui_sidebar(ui);
+                            });
                     });
             }
         }
@@ -2717,7 +2918,7 @@ impl eframe::App for DesktopApp {
                     ui.label("Supports Microsoft RDP and VNC protocols.");
                     ui.add_space(8.0);
                     ui.label(
-                        RichText::new("Version 1.0.3")
+                        RichText::new(format!("Version {}", env!("CARGO_PKG_VERSION")))
                             .small()
                             .color(theme::TEXT_DIM),
                     );
