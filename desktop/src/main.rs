@@ -1961,7 +1961,7 @@ impl DesktopApp {
                             !busy,
                             egui::TextEdit::singleline(&mut tab.prefs.domain)
                                 .desired_width(f32::INFINITY)
-                                .hint_text("optional"),
+                                .hint_text(RichText::new("optional").color(Color32::from_rgb(0x60, 0x65, 0x70))),
                         );
                         ui.end_row();
                     }
@@ -2933,99 +2933,113 @@ impl DesktopApp {
 
                                                 let card_w = 220.0;
                                                 let card_h = 80.0;
+                                                let mut card_close_clicked = false;
 
-                                                egui::Frame::new()
-                                                    .fill(fill)
-                                                    .stroke(stroke)
-                                                    .corner_radius(6.0)
-                                                    .inner_margin(egui::Margin::symmetric(12, 8))
-                                                    .show(ui, |ui| {
-                                                        ui.set_min_size(Vec2::new(card_w, card_h));
-                                                        ui.set_max_size(Vec2::new(card_w, card_h));
-                                                        ui.vertical(|ui| {
-                                                            // Row 1: Header (Status dot + status label | mode + '×' button)
-                                                            ui.horizontal(|ui| {
-                                                                let (dot, _) = ui.allocate_exact_size(
-                                                                    Vec2::splat(9.0),
-                                                                    egui::Sense::hover(),
+                                                let (card_rect, card_response) = ui.allocate_exact_size(
+                                                    Vec2::new(card_w, card_h),
+                                                    egui::Sense::click(),
+                                                );
+
+                                                ui.painter().rect_filled(card_rect, 6.0, fill);
+                                                ui.painter().rect_stroke(card_rect, 6.0, stroke, egui::StrokeKind::Outside);
+
+                                                let mut child_ui = ui.new_child(
+                                                    egui::UiBuilder::new()
+                                                        .max_rect(card_rect.shrink(8.0))
+                                                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                                                );
+
+                                                child_ui.horizontal(|ui| {
+                                                    let (dot, _) = ui.allocate_exact_size(
+                                                        Vec2::splat(9.0),
+                                                        egui::Sense::hover(),
+                                                    );
+                                                    ui.painter().circle_filled(
+                                                        dot.center(),
+                                                        4.0,
+                                                        state.color(),
+                                                    );
+                                                    ui.label(
+                                                        RichText::new(state.label())
+                                                            .small()
+                                                            .color(state.color()),
+                                                    );
+
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                        |ui| {
+                                                            let (close_rect, close_resp) = ui
+                                                                .allocate_exact_size(
+                                                                    Vec2::splat(18.0),
+                                                                    egui::Sense::click(),
                                                                 );
+                                                            let close_resp = close_resp
+                                                                .on_hover_text("Close tab and disconnect");
+                                                            let is_close_hovered =
+                                                                close_resp.hovered();
+
+                                                            if is_close_hovered {
                                                                 ui.painter().circle_filled(
-                                                                    dot.center(),
-                                                                    4.0,
-                                                                    state.color(),
+                                                                    close_rect.center(),
+                                                                    8.0,
+                                                                    Color32::from_rgb(210, 50, 50),
                                                                 );
-                                                                ui.label(
-                                                                    RichText::new(state.label())
-                                                                        .small()
-                                                                        .color(state.color()),
-                                                                );
+                                                            }
 
-                                                                ui.with_layout(
-                                                                    egui::Layout::right_to_left(egui::Align::Center),
-                                                                    |ui| {
-                                                                        // Quick Close '×' button on card
-                                                                        let close_btn = ui
-                                                                            .add(
-                                                                                egui::Button::new(
-                                                                                    RichText::new("×")
-                                                                                        .size(15.0)
-                                                                                        .strong(),
-                                                                                )
-                                                                                .frame(false)
-                                                                                .min_size(Vec2::new(18.0, 18.0)),
-                                                                            )
-                                                                            .on_hover_text("Close tab and disconnect");
+                                                            let x_color = if is_close_hovered {
+                                                                Color32::WHITE
+                                                            } else {
+                                                                theme::TEXT_DIM
+                                                            };
 
-                                                                        if close_btn.clicked() {
-                                                                            close_tab_index = Some(i);
-                                                                        }
-
-                                                                        ui.add_space(4.0);
-                                                                        ui.label(
-                                                                            RichText::new(format!("• {}", tab.prefs.mode))
-                                                                                .small()
-                                                                                .monospace()
-                                                                                .color(theme::TEXT_DIM),
-                                                                        );
-                                                                    },
-                                                                );
-                                                            });
-
-                                                            ui.add_space(4.0);
-
-                                                            // Row 2: Body area (Clickable to switch tab, non-overlapping with header x button)
-                                                            let body_res = ui.vertical(|ui| {
-                                                                let label = RichText::new(&title).strong().size(13.0);
-                                                                ui.add(
-                                                                    egui::Label::new(if selected {
-                                                                        label.color(theme::TEXT)
-                                                                    } else {
-                                                                        label.color(theme::TEXT_DIM)
-                                                                    })
-                                                                    .truncate(),
-                                                                );
-
-                                                                if !tab.prefs.username.is_empty() {
-                                                                    ui.label(
-                                                                        RichText::new(format!("User: {}", tab.prefs.username))
-                                                                            .small()
-                                                                            .color(theme::TEXT_DIM),
-                                                                    );
-                                                                }
-                                                            });
-
-                                                            let body_click = ui.interact(
-                                                                body_res.response.rect,
-                                                                ui.id().with("card_body").with(tab.tab_id),
-                                                                egui::Sense::click(),
+                                                            ui.painter().text(
+                                                                close_rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                "×",
+                                                                egui::FontId::proportional(14.0),
+                                                                x_color,
                                                             );
 
-                                                            if body_click.clicked() {
-                                                                select_tab_index = Some(i);
-                                                                close_popup = true;
+                                                            if close_resp.clicked() {
+                                                                card_close_clicked = true;
                                                             }
-                                                        });
-                                                    });
+
+                                                            ui.add_space(4.0);
+                                                            ui.label(
+                                                                RichText::new(format!("• {}", tab.prefs.mode))
+                                                                    .small()
+                                                                    .monospace()
+                                                                    .color(theme::TEXT_DIM),
+                                                            );
+                                                        },
+                                                    );
+                                                });
+
+                                                child_ui.add_space(4.0);
+                                                let label = RichText::new(&title).strong().size(13.0);
+                                                child_ui.add(
+                                                    egui::Label::new(if selected {
+                                                        label.color(theme::TEXT)
+                                                    } else {
+                                                        label.color(theme::TEXT_DIM)
+                                                    })
+                                                    .truncate(),
+                                                );
+
+                                                if !tab.prefs.username.is_empty() {
+                                                    child_ui.label(
+                                                        RichText::new(format!("User: {}", tab.prefs.username))
+                                                            .small()
+                                                            .color(theme::TEXT_DIM),
+                                                    );
+                                                }
+
+                                                if card_close_clicked {
+                                                    close_tab_index = Some(i);
+                                                } else if card_response.clicked() {
+                                                    select_tab_index = Some(i);
+                                                    close_popup = true;
+                                                }
                                             }
                                         });
                                     });
