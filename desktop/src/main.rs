@@ -2931,8 +2931,8 @@ impl DesktopApp {
                                                     egui::Stroke::new(1.0_f32, theme::BORDER)
                                                 };
 
-                                                let card_w = 220.0;
-                                                let card_h = 80.0;
+                                                let card_w = 230.0;
+                                                let card_h = 88.0;
                                                 let mut card_close_clicked = false;
 
                                                 let (card_rect, card_response) = ui.allocate_exact_size(
@@ -2945,7 +2945,7 @@ impl DesktopApp {
 
                                                 let mut child_ui = ui.new_child(
                                                     egui::UiBuilder::new()
-                                                        .max_rect(card_rect.shrink(8.0))
+                                                        .max_rect(card_rect.shrink2(Vec2::new(12.0, 10.0)))
                                                         .layout(egui::Layout::top_down(egui::Align::LEFT)),
                                                 );
 
