@@ -36,11 +36,38 @@ class RdpViewModel : RdpClient.Callback {
     var password by mutableStateOf("")
     var domain by mutableStateOf("")
     var connectionMode by mutableStateOf("RDP")
+    var selectedResolution by mutableStateOf("1920x1080 (FHD)")
 
     var cursorType by mutableStateOf(0)
     var cursorBitmap: Bitmap? by mutableStateOf(null)
     var cursorHotX by mutableStateOf(0)
     var cursorHotY by mutableStateOf(0)
+
+    fun calculateTargetResolution(metrics: android.util.DisplayMetrics): Pair<Int, Int> {
+        val option = selectedResolution
+        return when {
+            option.contains("Native") -> {
+                val rawW = maxOf(metrics.widthPixels, metrics.heightPixels)
+                val rawH = minOf(metrics.widthPixels, metrics.heightPixels)
+                // Round and align width and height to multiples of 4 for video codec and bitmap stride safety
+                val alignedW = ((rawW + 3) / 4) * 4
+                val alignedH = ((rawH + 3) / 4) * 4
+                Pair(maxOf(alignedW, 640), maxOf(alignedH, 480))
+            }
+            option.contains("x") -> {
+                try {
+                    val cleanStr = option.split(" ")[0]
+                    val parts = cleanStr.split("x")
+                    val w = parts[0].trim().toInt()
+                    val h = parts[1].trim().toInt()
+                    Pair(w, h)
+                } catch (e: Exception) {
+                    Pair(1920, 1080)
+                }
+            }
+            else -> Pair(1920, 1080)
+        }
+    }
 
     fun initBitmap(width: Int, height: Int) {
         screenWidth = width

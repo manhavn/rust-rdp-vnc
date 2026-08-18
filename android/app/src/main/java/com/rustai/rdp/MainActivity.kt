@@ -123,12 +123,10 @@ class MainActivity : ComponentActivity() {
         domain: String,
         connectionMode: String
     ) {
-        val metrics = resources.displayMetrics
-        val dynamicWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
-        val dynamicHeight = minOf(metrics.widthPixels, metrics.heightPixels)
+        val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(resources.displayMetrics)
 
         viewModel.onStateChanged(1, "Negotiating $connectionMode Connection...")
-        viewModel.initBitmap(dynamicWidth, dynamicHeight)
+        viewModel.initBitmap(targetWidth, targetHeight)
         
         val defaultPort = if (connectionMode == "VNC") 5900 else 3389
 
@@ -140,8 +138,8 @@ class MainActivity : ComponentActivity() {
                     username,
                     password,
                     domain,
-                    dynamicWidth,
-                    dynamicHeight,
+                    targetWidth,
+                    targetHeight,
                     connectionMode,
                     viewModel
                 )
@@ -165,6 +163,7 @@ class MainActivity : ComponentActivity() {
             val passwordVal = it.getStringExtra("password")
             val domainVal = it.getStringExtra("domain")
             val connModeVal = it.getStringExtra("connectionMode") ?: "RDP"
+            val resolutionVal = it.getStringExtra("resolution")
             val autoconnectVal = it.getBooleanExtra("autoconnect", false) || it.getStringExtra("autoconnect") == "true"
             
             if (!hostVal.isNullOrEmpty()) {
@@ -175,6 +174,7 @@ class MainActivity : ComponentActivity() {
                     if (usernameVal != null) putString("username", usernameVal)
                     if (passwordVal != null) putString("password", passwordVal)
                     if (domainVal != null) putString("domain", domainVal)
+                    if (resolutionVal != null) putString("resolution", resolutionVal)
                     putString("connectionMode", connModeVal)
                     apply()
                 }
@@ -185,6 +185,7 @@ class MainActivity : ComponentActivity() {
                 if (usernameVal != null) viewModel.username = usernameVal
                 if (passwordVal != null) viewModel.password = passwordVal
                 if (domainVal != null) viewModel.domain = domainVal
+                if (resolutionVal != null) viewModel.selectedResolution = resolutionVal
                 viewModel.connectionMode = connModeVal
                 
 
@@ -299,6 +300,9 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                 var rdpPass = ""
                 var rdpDomain = ""
                 var detectedMode = "RDP"
+                var fileWidth = ""
+                var fileHeight = ""
+                var fileRes = ""
                 for (line in lines) {
                     if (line.startsWith("full address:s:")) {
                         rdpHost = line.substringAfter("full address:s:")
@@ -312,6 +316,12 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         detectedMode = line.substringAfter("connection mode:s:")
                     } else if (line.startsWith("mode:s:")) {
                         detectedMode = line.substringAfter("mode:s:")
+                    } else if (line.startsWith("desktopwidth:i:")) {
+                        fileWidth = line.substringAfter("desktopwidth:i:")
+                    } else if (line.startsWith("desktopheight:i:")) {
+                        fileHeight = line.substringAfter("desktopheight:i:")
+                    } else if (line.startsWith("resolution:s:")) {
+                        fileRes = line.substringAfter("resolution:s:")
                     }
                 }
                 
@@ -343,14 +353,17 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                     viewModel.password = rdpPass
                     viewModel.domain = rdpDomain
                     viewModel.connectionMode = detectedMode
+                    if (fileRes.isNotEmpty()) {
+                        viewModel.selectedResolution = fileRes
+                    } else if (fileWidth.isNotEmpty() && fileHeight.isNotEmpty()) {
+                        viewModel.selectedResolution = "${fileWidth}x${fileHeight}"
+                    }
                     
                     // Auto connect
-                    val metrics = context.resources.displayMetrics
-                    val dynamicWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
-                    val dynamicHeight = minOf(metrics.widthPixels, metrics.heightPixels)
+                    val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(context.resources.displayMetrics)
 
                     viewModel.onStateChanged(1, "Negotiating ${detectedMode} Connection...")
-                    viewModel.initBitmap(dynamicWidth, dynamicHeight)
+                    viewModel.initBitmap(targetWidth, targetHeight)
                     
                     CoroutineScope(Dispatchers.IO).launch {
                         try {
@@ -360,8 +373,8 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                                 rdpUser,
                                 rdpPass,
                                 rdpDomain,
-                                dynamicWidth,
-                                dynamicHeight,
+                                targetWidth,
+                                targetHeight,
                                 detectedMode,
                                 viewModel
                             )
@@ -395,6 +408,10 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                             writer.write("domain:s:${viewModel.domain}\n")
                         }
                         writer.write("connection mode:s:${viewModel.connectionMode}\n")
+                        writer.write("resolution:s:${viewModel.selectedResolution}\n")
+                        val (rw, rh) = viewModel.calculateTargetResolution(context.resources.displayMetrics)
+                        writer.write("desktopwidth:i:${rw}\n")
+                        writer.write("desktopheight:i:${rh}\n")
                     }
                 }
             } catch (e: Exception) {
@@ -411,6 +428,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             viewModel.password = sharedPrefs.getString("password", "") ?: ""
             viewModel.domain = sharedPrefs.getString("domain", "") ?: ""
             viewModel.connectionMode = sharedPrefs.getString("connectionMode", "RDP") ?: "RDP"
+            viewModel.selectedResolution = sharedPrefs.getString("resolution", "1920x1080 (FHD)") ?: "1920x1080 (FHD)"
         }
     }
 
@@ -624,12 +642,69 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         )
                     }
                 },
-                modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
                     unfocusedBorderColor = Color(0xFF475569)
                 )
             )
+
+            // Resolution Dropdown Selector
+            var resolutionExpanded by remember { mutableStateOf(false) }
+            val resolutionOptions = listOf(
+                "1920x1080 (FHD)",
+                "1280x720 (HD)",
+                "2560x1440 (2K)",
+                "1024x768 (SD)",
+                "Native Display"
+            )
+
+            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+                OutlinedButton(
+                    onClick = { resolutionExpanded = true },
+                    modifier = Modifier.fillMaxWidth().height(54.dp),
+                    shape = RoundedCornerShape(4.dp),
+                    border = BorderStroke(1.dp, Color(0xFF475569)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text("Resolution", fontSize = 10.sp, color = Color(0xFF94A3B8))
+                            Text(
+                                text = viewModel.selectedResolution,
+                                color = Color.White,
+                                fontSize = 14.sp
+                            )
+                        }
+                        Text("▼", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    }
+                }
+
+                DropdownMenu(
+                    expanded = resolutionExpanded,
+                    onDismissRequest = { resolutionExpanded = false },
+                    modifier = Modifier.background(Color(0xFF1E293B))
+                ) {
+                    resolutionOptions.forEach { option ->
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    text = option,
+                                    color = if (viewModel.selectedResolution == option) MaterialTheme.colorScheme.primary else Color.White
+                                )
+                            },
+                            onClick = {
+                                viewModel.selectedResolution = option
+                                resolutionExpanded = false
+                            }
+                        )
+                    }
+                }
+            }
 
             Button(
                 onClick = {
@@ -641,15 +716,14 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         putString("password", password)
                         putString("domain", domain)
                         putString("connectionMode", connectionMode)
+                        putString("resolution", viewModel.selectedResolution)
                         apply()
                     }
 
-                    val metrics = context.resources.displayMetrics
-                    val dynamicWidth = maxOf(metrics.widthPixels, metrics.heightPixels)
-                    val dynamicHeight = minOf(metrics.widthPixels, metrics.heightPixels)
+                    val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(context.resources.displayMetrics)
 
                     viewModel.onStateChanged(1, "Negotiating $connectionMode Connection...")
-                    viewModel.initBitmap(dynamicWidth, dynamicHeight)
+                    viewModel.initBitmap(targetWidth, targetHeight)
                     
                     val defaultPort = if (connectionMode == "VNC") 5900 else 3389
 
@@ -661,8 +735,8 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                                 username,
                                 password,
                                 domain,
-                                dynamicWidth,
-                                dynamicHeight,
+                                targetWidth,
+                                targetHeight,
                                 connectionMode,
                                 viewModel
                             )

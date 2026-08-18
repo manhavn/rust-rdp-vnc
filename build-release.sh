@@ -25,6 +25,13 @@ fi
 if ! command -v gradle &> /dev/null && [ -d "/home/dev/tools/gradle-8.7/bin" ]; then
     export PATH="/home/dev/tools/gradle-8.7/bin:$PATH"
 fi
+if [ -z "$ANDROID_HOME" ]; then
+    if [ -d "/home/dev2/Android/android-sdk" ]; then
+        export ANDROID_HOME="/home/dev2/Android/android-sdk"
+    elif [ -d "/home/dev/Android/android-sdk" ]; then
+        export ANDROID_HOME="/home/dev/Android/android-sdk"
+    fi
+fi
 
 # Run gradle release build
 echo -e "\n${CYAN}Running gradle build task...${NC}"

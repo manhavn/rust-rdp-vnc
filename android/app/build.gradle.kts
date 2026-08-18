@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -98,7 +100,15 @@ tasks.register<Exec>("buildRust") {
     val isRelease = !project.hasProperty("rustDebug")
     val targetDirName = if (isRelease) "release" else "debug"
     
-    environment("ANDROID_NDK_HOME", "/home/dev/Android/android-sdk/ndk/25.2.9519653")
+    val localProps = Properties()
+    val localPropsFile = project.rootDir.resolve("local.properties")
+    if (localPropsFile.exists()) {
+        localProps.load(localPropsFile.inputStream())
+    }
+    val sdkDir = localProps.getProperty("sdk.dir") ?: System.getenv("ANDROID_HOME") ?: System.getenv("ANDROID_SDK_ROOT") ?: "/home/dev2/Android/android-sdk"
+    val ndkHome = System.getenv("ANDROID_NDK_HOME") ?: "$sdkDir/ndk/25.2.9519653"
+
+    environment("ANDROID_NDK_HOME", ndkHome)
     workingDir("../../rust_rdp")
     
     val argsList = mutableListOf(
@@ -116,8 +126,6 @@ tasks.register<Exec>("buildRust") {
     doLast {
         val jniLibsDir = project.file("src/main/jniLibs")
         jniLibsDir.mkdirs()
-        
-        val ndkHome = "/home/dev/Android/android-sdk/ndk/25.2.9519653"
         
         val arm64So = project.file("../../target/aarch64-linux-android/$targetDirName/librust_rdp.so")
         val x86_64So = project.file("../../target/x86_64-linux-android/$targetDirName/librust_rdp.so")
