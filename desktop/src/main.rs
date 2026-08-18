@@ -261,72 +261,152 @@ impl Default for Prefs {
     }
 }
 
+struct AppSession {
+    active_tab: usize,
+    enable_hover_throttle: bool,
+    hover_send_interval_ms: u64,
+    disable_rust_log: bool,
+    tabs: Vec<Prefs>,
+}
+
+impl Default for AppSession {
+    fn default() -> Self {
+        Self {
+            active_tab: 0,
+            enable_hover_throttle: false,
+            hover_send_interval_ms: 1000,
+            disable_rust_log: false,
+            tabs: vec![Prefs::default()],
+        }
+    }
+}
+
+impl AppSession {
+    fn load() -> Self {
+        let Some(path) = Prefs::path() else {
+            return Self::default();
+        };
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Self::default();
+        };
+        Self::parse(&text)
+    }
+
+    fn parse(text: &str) -> Self {
+        let mut session = Self {
+            active_tab: 0,
+            enable_hover_throttle: false,
+            hover_send_interval_ms: 1000,
+            disable_rust_log: false,
+            tabs: Vec::new(),
+        };
+
+        let mut current_tab: Option<Prefs> = None;
+        let mut fallback_single = Prefs::default();
+        let mut saw_tab_section = false;
+
+        for line in text.lines() {
+            let line = line.trim_matches(|c| c == '\r' || c == '\n');
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+
+            if trimmed.eq_ignore_ascii_case("[tab]") {
+                saw_tab_section = true;
+                if let Some(t) = current_tab.take() {
+                    session.tabs.push(t);
+                }
+                current_tab = Some(Prefs::default());
+                continue;
+            }
+
+            if let Some((k, v)) = line.split_once('=') {
+                let k = k.trim();
+                let v = v.trim();
+
+                if let Some(ref mut p) = current_tab {
+                    match k {
+                        "host" => p.host = v.to_string(),
+                        "port" => p.port = v.to_string(),
+                        "username" => p.username = v.to_string(),
+                        "password" => {
+                            p.password = v.trim_matches(|c| c == '\r' || c == '\n').to_string()
+                        }
+                        "domain" => p.domain = v.to_string(),
+                        "mode" => p.mode = v.to_string(),
+                        "width" => p.width = v.to_string(),
+                        "height" => p.height = v.to_string(),
+                        "enable_hover_throttle" => {
+                            p.enable_hover_throttle = v.parse().unwrap_or(false)
+                        }
+                        "hover_send_interval_ms" => {
+                            p.hover_send_interval_ms = v.parse().unwrap_or(1000)
+                        }
+                        "disable_rust_log" | "disable_frame_complete_log" => {
+                            p.disable_rust_log = v.parse().unwrap_or(false)
+                        }
+                        _ => {}
+                    }
+                } else {
+                    match k {
+                        "active_tab" => session.active_tab = v.parse().unwrap_or(0),
+                        "enable_hover_throttle" => {
+                            let b = v.parse().unwrap_or(false);
+                            session.enable_hover_throttle = b;
+                            fallback_single.enable_hover_throttle = b;
+                        }
+                        "hover_send_interval_ms" => {
+                            let ms = v.parse().unwrap_or(1000);
+                            session.hover_send_interval_ms = ms;
+                            fallback_single.hover_send_interval_ms = ms;
+                        }
+                        "disable_rust_log" | "disable_frame_complete_log" => {
+                            let b = v.parse().unwrap_or(false);
+                            session.disable_rust_log = b;
+                            fallback_single.disable_rust_log = b;
+                        }
+                        "host" => fallback_single.host = v.to_string(),
+                        "port" => fallback_single.port = v.to_string(),
+                        "username" => fallback_single.username = v.to_string(),
+                        "password" => {
+                            fallback_single.password =
+                                v.trim_matches(|c| c == '\r' || c == '\n').to_string()
+                        }
+                        "domain" => fallback_single.domain = v.to_string(),
+                        "mode" => fallback_single.mode = v.to_string(),
+                        "width" => fallback_single.width = v.to_string(),
+                        "height" => fallback_single.height = v.to_string(),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(t) = current_tab.take() {
+            session.tabs.push(t);
+        }
+
+        if !saw_tab_section && session.tabs.is_empty() {
+            session.tabs.push(fallback_single);
+        }
+
+        if session.tabs.is_empty() {
+            session.tabs.push(Prefs::default());
+        }
+
+        if session.active_tab >= session.tabs.len() {
+            session.active_tab = session.tabs.len().saturating_sub(1);
+        }
+
+        session
+    }
+}
+
 impl Prefs {
     fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("com", "rustai", "rust-rdp-vnc")
             .map(|d| d.config_dir().join("prefs.txt"))
-    }
-
-    fn load() -> Self {
-        let mut p = Self::default();
-        let Some(path) = Self::path() else {
-            return p;
-        };
-        let Ok(text) = std::fs::read_to_string(path) else {
-            return p;
-        };
-        for line in text.lines() {
-            let line = line.trim_matches(|c| c == '\r' || c == '\n');
-            if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim();
-                match k.trim() {
-                    "host" => p.host = v.to_string(),
-                    "port" => p.port = v.to_string(),
-                    "username" => p.username = v.to_string(),
-                    "password" => {
-                        p.password = v.trim_matches(|c| c == '\r' || c == '\n').to_string()
-                    }
-                    "domain" => p.domain = v.to_string(),
-                    "mode" => p.mode = v.to_string(),
-                    "width" => p.width = v.to_string(),
-                    "height" => p.height = v.to_string(),
-                    "enable_hover_throttle" => p.enable_hover_throttle = v.parse().unwrap_or(false),
-                    "hover_send_interval_ms" => {
-                        p.hover_send_interval_ms = v.parse().unwrap_or(1000)
-                    }
-                    "disable_rust_log" | "disable_frame_complete_log" => {
-                        p.disable_rust_log = v.parse().unwrap_or(false)
-                    }
-                    _ => {}
-                }
-            }
-        }
-        p
-    }
-
-    /// Silent app prefs (last session) under XDG config.
-    fn save_app_prefs(&self) {
-        let Some(path) = Self::path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let text = format!(
-            "host={}\nport={}\nusername={}\npassword={}\ndomain={}\nmode={}\nwidth={}\nheight={}\nenable_hover_throttle={}\nhover_send_interval_ms={}\ndisable_rust_log={}\n",
-            self.host,
-            self.port,
-            self.username,
-            self.password,
-            self.domain,
-            self.mode,
-            self.width,
-            self.height,
-            self.enable_hover_throttle,
-            self.hover_send_interval_ms,
-            self.disable_rust_log
-        );
-        let _ = std::fs::write(path, text);
     }
 
     fn file_extension(&self) -> &'static str {
@@ -678,6 +758,8 @@ struct DesktopApp {
     system_input_capture: SystemInputCapture,
     /// Exact local-only hitbox of the floating Exit control.
     view_exit_overlay_rect: Option<egui::Rect>,
+    /// Toggle state of quick tab list in view fullscreen mode.
+    show_fullscreen_tabs: bool,
     toast: Option<Toast>,
     /// Tab id waiting for “close while connected?” confirmation (× / Ctrl+W).
     pending_close_tab_id: Option<u64>,
@@ -740,16 +822,25 @@ impl DesktopApp {
         cc.egui_ctx
             .options_mut(|options| options.zoom_with_keyboard = false);
 
-        let loaded_prefs = Prefs::load();
-        let enable_hover_throttle = loaded_prefs.enable_hover_throttle;
-        let hover_send_interval_ms = loaded_prefs.hover_send_interval_ms;
-        let disable_rust_log = loaded_prefs.disable_rust_log;
+        let session = AppSession::load();
+        let enable_hover_throttle = session.enable_hover_throttle;
+        let hover_send_interval_ms = session.hover_send_interval_ms;
+        let disable_rust_log = session.disable_rust_log;
         rust_rdp::set_disable_rust_log(disable_rust_log);
-        let first = ConnectionTab::new(1, loaded_prefs);
+
+        let mut tabs = Vec::new();
+        let mut next_id = 1u64;
+        for tab_prefs in session.tabs {
+            tabs.push(ConnectionTab::new(next_id, tab_prefs));
+            next_id += 1;
+        }
+
+        let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
+
         Self {
-            tabs: vec![first],
-            active_tab: 0,
-            next_tab_id: 2,
+            tabs,
+            active_tab,
+            next_tab_id: next_id,
             show_sidebar: true,
             show_about: false,
             fit_mode: FitMode::Fit,
@@ -761,12 +852,47 @@ impl DesktopApp {
             remote_input_owned_last_frame: false,
             system_input_capture: SystemInputCapture::new(cc),
             view_exit_overlay_rect: None,
+            show_fullscreen_tabs: false,
             toast: None,
             pending_close_tab_id: None,
             enable_hover_throttle,
             hover_send_interval_ms,
             disable_rust_log,
         }
+    }
+
+    /// Save current session state (all open tabs + active tab) under XDG config.
+    fn save_app_prefs(&self) {
+        let Some(path) = Prefs::path() else {
+            return;
+        };
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut text = String::new();
+        text.push_str(&format!("active_tab={}\n", self.active_tab));
+        text.push_str(&format!("enable_hover_throttle={}\n", self.enable_hover_throttle));
+        text.push_str(&format!("hover_send_interval_ms={}\n", self.hover_send_interval_ms));
+        text.push_str(&format!("disable_rust_log={}\n", self.disable_rust_log));
+        text.push_str("\n");
+
+        for tab in &self.tabs {
+            text.push_str("[tab]\n");
+            text.push_str(&format!("host={}\n", tab.prefs.host));
+            text.push_str(&format!("port={}\n", tab.prefs.port));
+            text.push_str(&format!("username={}\n", tab.prefs.username));
+            text.push_str(&format!("password={}\n", tab.prefs.password));
+            text.push_str(&format!("domain={}\n", tab.prefs.domain));
+            text.push_str(&format!("mode={}\n", tab.prefs.mode));
+            text.push_str(&format!("width={}\n", tab.prefs.width));
+            text.push_str(&format!("height={}\n", tab.prefs.height));
+            text.push_str(&format!("enable_hover_throttle={}\n", tab.prefs.enable_hover_throttle));
+            text.push_str(&format!("hover_send_interval_ms={}\n", tab.prefs.hover_send_interval_ms));
+            text.push_str(&format!("disable_rust_log={}\n", tab.prefs.disable_rust_log));
+            text.push_str("\n");
+        }
+
+        let _ = std::fs::write(path, text);
     }
 
     fn tab(&self) -> &ConnectionTab {
@@ -787,6 +913,7 @@ impl DesktopApp {
         } else {
             set_active_session(0);
         }
+        self.save_app_prefs();
     }
 
     /// Open a blank connection form in a new tab.
@@ -800,6 +927,7 @@ impl DesktopApp {
             // New form needs chrome; leave immersive mode.
             // Caller may pass ctx — handled where needed.
         }
+        self.save_app_prefs();
     }
 
     /// Request closing a tab. Confirms first when the session is connecting/connected.
@@ -844,6 +972,7 @@ impl DesktopApp {
             if self.view_fullscreen {
                 self.exit_view_fullscreen(ctx);
             }
+            self.save_app_prefs();
             return;
         }
 
@@ -861,6 +990,7 @@ impl DesktopApp {
                 self.show_sidebar = true;
             }
         }
+        self.save_app_prefs();
     }
 
     /// Keyboard is owned by the remote session (no host shortcuts).
@@ -898,6 +1028,7 @@ impl DesktopApp {
         self.system_input_capture.set_captured(false);
         self.view_fullscreen = false;
         self.view_exit_overlay_rect = None;
+        self.show_fullscreen_tabs = false;
         self.remote_input_active = false;
         self.remote_input_owned_last_frame = false;
         self.show_sidebar = self.sidebar_before_view_fs;
@@ -960,9 +1091,9 @@ impl DesktopApp {
                 {
                     let tab = self.tab_mut();
                     tab.prefs = loaded;
-                    tab.prefs.save_app_prefs();
                     *tab.shared.status.lock() = msg.clone();
                 }
+                self.save_app_prefs();
                 self.show_toast(msg, ToastKind::Info);
                 self.start_connect();
             }
@@ -1002,7 +1133,7 @@ impl DesktopApp {
         match std::fs::write(&path, body) {
             Ok(()) => {
                 // Also refresh local app prefs so next launch remembers fields
-                self.tab_mut().prefs.save_app_prefs();
+                self.save_app_prefs();
                 let msg = format!("Connection saved to {}", path.display());
                 *self.tab_mut().shared.status.lock() = msg.clone();
                 self.show_toast(msg, ToastKind::Success);
@@ -1028,10 +1159,9 @@ impl DesktopApp {
         if self.is_busy() {
             return;
         }
-        let tab = self.tab_mut();
-        tab.prefs = Prefs::default();
-        tab.prefs.save_app_prefs();
-        *tab.shared.status.lock() = "Form cleared".into();
+        self.tab_mut().prefs = Prefs::default();
+        *self.tab().shared.status.lock() = "Form cleared".into();
+        self.save_app_prefs();
         self.show_toast("Form cleared", ToastKind::Info);
     }
 
@@ -1123,7 +1253,7 @@ impl DesktopApp {
             disconnect_session_id(old);
         }
 
-        self.tab_mut().prefs.save_app_prefs();
+        self.save_app_prefs();
 
         let (host, port, username, password, domain, mode, width, height, endpoint, shared) = {
             let tab = self.tab();
@@ -1450,7 +1580,7 @@ impl DesktopApp {
                 {
                     rust_rdp::set_disable_rust_log(self.disable_rust_log);
                     self.tab_mut().prefs.disable_rust_log = self.disable_rust_log;
-                    self.tab_mut().prefs.save_app_prefs();
+                    self.save_app_prefs();
                 }
             });
 
@@ -1478,7 +1608,7 @@ impl DesktopApp {
             {
                 self.tab_mut().prefs.enable_hover_throttle = self.enable_hover_throttle;
                 self.tab_mut().prefs.hover_send_interval_ms = self.hover_send_interval_ms;
-                self.tab_mut().prefs.save_app_prefs();
+                self.save_app_prefs();
             }
 
             ui.menu_button("Help", |ui| {
@@ -1579,6 +1709,7 @@ impl DesktopApp {
 
     fn ui_tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut select: Option<usize> = None;
+        let mut double_click_tab: Option<usize> = None;
         let mut close: Option<usize> = None;
         let mut new_tab = false;
 
@@ -1612,27 +1743,39 @@ impl DesktopApp {
                             .show(ui, |ui| {
                                 ui.horizontal_centered(|ui| {
                                     ui.spacing_mut().item_spacing.x = 4.0;
-                                    // Status dot
-                                    let (dot, _) = ui.allocate_exact_size(
-                                        Vec2::splat(7.0),
-                                        egui::Sense::hover(),
-                                    );
-                                    ui.painter().circle_filled(dot.center(), 3.0, state.color());
 
-                                    let label = RichText::new(title).small();
-                                    if ui
-                                        .add(
-                                            egui::Label::new(if selected {
+                                    let tab_title_resp = ui
+                                        .horizontal(|ui| {
+                                            ui.spacing_mut().item_spacing.x = 4.0;
+                                            // Status dot
+                                            let (dot, _) = ui.allocate_exact_size(
+                                                Vec2::splat(7.0),
+                                                egui::Sense::hover(),
+                                            );
+                                            ui.painter().circle_filled(dot.center(), 3.0, state.color());
+
+                                            let label = RichText::new(title).small();
+                                            ui.add(egui::Label::new(if selected {
                                                 label.strong().color(theme::TEXT)
                                             } else {
                                                 label.color(theme::TEXT_DIM)
-                                            })
-                                            .sense(egui::Sense::click()),
+                                            }));
+                                        })
+                                        .response;
+
+                                    let title_resp = ui
+                                        .interact(
+                                            tab_title_resp.rect,
+                                            ui.id().with(tab.tab_id),
+                                            egui::Sense::click(),
                                         )
-                                        .on_hover_text("Switch to this connection")
-                                        .clicked()
-                                    {
+                                        .on_hover_text("Switch to this connection (double-click for fullscreen)");
+
+                                    if title_resp.clicked() {
                                         select = Some(i);
+                                    }
+                                    if title_resp.double_clicked() {
+                                        double_click_tab = Some(i);
                                     }
 
                                     let close_resp = ui
@@ -1662,7 +1805,10 @@ impl DesktopApp {
                 });
             });
 
-        if let Some(i) = select {
+        if let Some(i) = double_click_tab {
+            self.select_tab(i);
+            self.enter_view_fullscreen(ctx);
+        } else if let Some(i) = select {
             self.select_tab(i);
         }
         if let Some(i) = close {
@@ -2627,9 +2773,10 @@ impl DesktopApp {
         }
     }
 
-    /// Thin floating bar to exit view fullscreen (mouse to top edge).
+    /// Thin floating bar to exit view fullscreen or quick switch tabs (mouse to top edge).
     fn ui_view_fullscreen_overlay(&mut self, ctx: &egui::Context) {
         if !self.view_fullscreen {
+            self.show_fullscreen_tabs = false;
             return;
         }
 
@@ -2655,26 +2802,253 @@ impl DesktopApp {
             })
             .unwrap_or(false);
 
-        if !near_exit {
+        let mut exit_clicked = false;
+        let mut toggle_tabs_clicked = false;
+        let mut select_tab_index: Option<usize> = None;
+        let mut close_popup = false;
+
+        // Top edge floating bar: [ Exit ] [ • ]
+        if near_exit {
+            let overlay = egui::Area::new(egui::Id::new("view_fs_overlay"))
+                .anchor(egui::Align2::CENTER_TOP, [0.0, 4.0])
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::from_black_alpha(220))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                        .corner_radius(4.0)
+                        .inner_margin(egui::Margin::symmetric(6, 3))
+                        .show(ui, |ui| {
+                            ui.horizontal_centered(|ui| {
+                                ui.spacing_mut().item_spacing.x = 4.0;
+
+                                let exit_res = ui
+                                    .small_button("Exit")
+                                    .on_hover_text("Exit fullscreen view");
+                                if exit_res.clicked() {
+                                    exit_clicked = true;
+                                }
+
+                                let exit_h = exit_res.rect.height();
+
+                                let dot_btn = ui
+                                    .add_sized(
+                                        Vec2::splat(exit_h),
+                                        egui::Button::new(RichText::new("•").size(10.0).strong())
+                                            .small(),
+                                    )
+                                    .on_hover_text(if self.show_fullscreen_tabs {
+                                        "Close tab manager"
+                                    } else {
+                                        "Quick tab manager"
+                                    });
+
+                                if dot_btn.clicked() {
+                                    toggle_tabs_clicked = true;
+                                }
+                            });
+                        });
+                });
+            self.view_exit_overlay_rect = Some(overlay.response.rect);
+        } else {
             self.view_exit_overlay_rect = None;
-            return;
         }
 
-        let mut exit_clicked = false;
-        let overlay = egui::Area::new(egui::Id::new("view_fs_overlay"))
-            .anchor(egui::Align2::CENTER_TOP, [0.0, 4.0])
-            .order(egui::Order::Foreground)
-            .show(ctx, |ui| {
-                egui::Frame::new()
-                    .fill(Color32::from_black_alpha(200))
-                    .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                    .corner_radius(4.0)
-                    .inner_margin(egui::Margin::symmetric(6, 3))
-                    .show(ui, |ui| {
-                        exit_clicked = ui.small_button("Exit").clicked();
-                    });
-            });
-        self.view_exit_overlay_rect = Some(overlay.response.rect);
+        // Separate fixed 90% width x 90% height popup modal for switching tabs inside fullscreen mode
+        if self.show_fullscreen_tabs {
+            let active_tab = self.active_tab;
+            let popup_w = (screen_rect.width() * 0.90).max(280.0);
+            let popup_h = (screen_rect.height() * 0.90).max(200.0);
+            let mut close_tab_index: Option<usize> = None;
+
+            egui::Area::new(egui::Id::new("fs_tabs_popup_area"))
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    egui::Frame::new()
+                        .fill(Color32::from_black_alpha(248))
+                        .stroke(egui::Stroke::new(1.5_f32, theme::ACCENT))
+                        .corner_radius(8.0)
+                        .inner_margin(egui::Margin::symmetric(16, 12))
+                        .show(ui, |ui| {
+                            ui.set_min_size(Vec2::new(popup_w, popup_h));
+                            ui.set_max_size(Vec2::new(popup_w, popup_h));
+                            ui.vertical(|ui| {
+                                // Header row
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!(
+                                            "Switch Connection ({} tabs)",
+                                            self.tabs.len()
+                                        ))
+                                        .strong()
+                                        .size(15.0)
+                                        .color(theme::TEXT),
+                                    );
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("×").size(18.0).strong(),
+                                                    )
+                                                    .frame(false)
+                                                    .min_size(Vec2::new(24.0, 24.0)),
+                                                )
+                                                .on_hover_text("Close modal")
+                                                .clicked()
+                                            {
+                                                close_popup = true;
+                                            }
+                                        },
+                                    );
+                                });
+
+                                ui.add_space(6.0);
+                                ui.separator();
+                                ui.add_space(10.0);
+
+                                // Vertical scrollable grid of uniform 220x80 tab cards
+                                egui::ScrollArea::vertical()
+                                    .id_salt("fs_tabs_popup_scroll")
+                                    .show(ui, |ui| {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.spacing_mut().item_spacing = Vec2::new(12.0, 12.0);
+                                            for (i, tab) in self.tabs.iter().enumerate() {
+                                                let selected = i == active_tab;
+                                                let title = tab.tab_title();
+                                                let state = *tab.shared.state.lock();
+
+                                                let fill = if selected {
+                                                    theme::PANEL_ALT
+                                                } else {
+                                                    theme::PANEL
+                                                };
+                                                let stroke = if selected {
+                                                    egui::Stroke::new(2.0_f32, theme::ACCENT)
+                                                } else {
+                                                    egui::Stroke::new(1.0_f32, theme::BORDER)
+                                                };
+
+                                                let card_w = 220.0;
+                                                let card_h = 80.0;
+
+                                                egui::Frame::new()
+                                                    .fill(fill)
+                                                    .stroke(stroke)
+                                                    .corner_radius(6.0)
+                                                    .inner_margin(egui::Margin::symmetric(12, 8))
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_size(Vec2::new(card_w, card_h));
+                                                        ui.set_max_size(Vec2::new(card_w, card_h));
+                                                        ui.vertical(|ui| {
+                                                            // Row 1: Header (Status dot + status label | mode + '×' button)
+                                                            ui.horizontal(|ui| {
+                                                                let (dot, _) = ui.allocate_exact_size(
+                                                                    Vec2::splat(9.0),
+                                                                    egui::Sense::hover(),
+                                                                );
+                                                                ui.painter().circle_filled(
+                                                                    dot.center(),
+                                                                    4.0,
+                                                                    state.color(),
+                                                                );
+                                                                ui.label(
+                                                                    RichText::new(state.label())
+                                                                        .small()
+                                                                        .color(state.color()),
+                                                                );
+
+                                                                ui.with_layout(
+                                                                    egui::Layout::right_to_left(egui::Align::Center),
+                                                                    |ui| {
+                                                                        // Quick Close '×' button on card
+                                                                        let close_btn = ui
+                                                                            .add(
+                                                                                egui::Button::new(
+                                                                                    RichText::new("×")
+                                                                                        .size(15.0)
+                                                                                        .strong(),
+                                                                                )
+                                                                                .frame(false)
+                                                                                .min_size(Vec2::new(18.0, 18.0)),
+                                                                            )
+                                                                            .on_hover_text("Close tab and disconnect");
+
+                                                                        if close_btn.clicked() {
+                                                                            close_tab_index = Some(i);
+                                                                        }
+
+                                                                        ui.add_space(4.0);
+                                                                        ui.label(
+                                                                            RichText::new(format!("• {}", tab.prefs.mode))
+                                                                                .small()
+                                                                                .monospace()
+                                                                                .color(theme::TEXT_DIM),
+                                                                        );
+                                                                    },
+                                                                );
+                                                            });
+
+                                                            ui.add_space(4.0);
+
+                                                            // Row 2: Body area (Clickable to switch tab, non-overlapping with header x button)
+                                                            let body_res = ui.vertical(|ui| {
+                                                                let label = RichText::new(&title).strong().size(13.0);
+                                                                ui.add(
+                                                                    egui::Label::new(if selected {
+                                                                        label.color(theme::TEXT)
+                                                                    } else {
+                                                                        label.color(theme::TEXT_DIM)
+                                                                    })
+                                                                    .truncate(),
+                                                                );
+
+                                                                if !tab.prefs.username.is_empty() {
+                                                                    ui.label(
+                                                                        RichText::new(format!("User: {}", tab.prefs.username))
+                                                                            .small()
+                                                                            .color(theme::TEXT_DIM),
+                                                                    );
+                                                                }
+                                                            });
+
+                                                            let body_click = ui.interact(
+                                                                body_res.response.rect,
+                                                                ui.id().with("card_body").with(tab.tab_id),
+                                                                egui::Sense::click(),
+                                                            );
+
+                                                            if body_click.clicked() {
+                                                                select_tab_index = Some(i);
+                                                                close_popup = true;
+                                                            }
+                                                        });
+                                                    });
+                                            }
+                                        });
+                                    });
+                            });
+                        });
+                });
+
+            if let Some(i) = close_tab_index {
+                self.request_close_tab(i, ctx);
+            }
+        }
+
+        if toggle_tabs_clicked {
+            self.show_fullscreen_tabs = !self.show_fullscreen_tabs;
+        }
+
+        if close_popup {
+            self.show_fullscreen_tabs = false;
+        }
+
+        if let Some(i) = select_tab_index {
+            self.select_tab(i);
+        }
 
         if exit_clicked {
             self.exit_view_fullscreen(ctx);
@@ -2946,6 +3320,7 @@ impl eframe::App for DesktopApp {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.save_app_prefs();
         self.release_remote_input_state();
         self.system_input_capture.set_captured(false);
         disconnect_session();
@@ -3216,5 +3591,47 @@ mod tests {
             .filter_map(|_| remote_wheel_units(40.0, false, &mut remainder))
             .sum();
         assert_eq!(units, 600);
+    }
+
+    #[test]
+    fn app_session_parses_multi_tab_config() {
+        let input = r#"
+active_tab=1
+enable_hover_throttle=true
+hover_send_interval_ms=500
+disable_rust_log=true
+
+[tab]
+host=192.168.1.10
+port=3389
+username=admin
+mode=RDP
+
+[tab]
+host=10.0.0.5
+port=5900
+username=vncuser
+mode=VNC
+"#;
+        let session = AppSession::parse(input);
+        assert_eq!(session.active_tab, 1);
+        assert_eq!(session.enable_hover_throttle, true);
+        assert_eq!(session.hover_send_interval_ms, 500);
+        assert_eq!(session.disable_rust_log, true);
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.tabs[0].host, "192.168.1.10");
+        assert_eq!(session.tabs[0].mode, "RDP");
+        assert_eq!(session.tabs[1].host, "10.0.0.5");
+        assert_eq!(session.tabs[1].mode, "VNC");
+    }
+
+    #[test]
+    fn app_session_parses_legacy_single_tab_config() {
+        let input = "host=192.168.1.100\nport=3389\nusername=user\nmode=RDP\n";
+        let session = AppSession::parse(input);
+        assert_eq!(session.active_tab, 0);
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.tabs[0].host, "192.168.1.100");
+        assert_eq!(session.tabs[0].port, "3389");
     }
 }
