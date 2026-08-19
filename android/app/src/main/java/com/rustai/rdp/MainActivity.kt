@@ -164,6 +164,8 @@ class MainActivity : ComponentActivity() {
             val domainVal = it.getStringExtra("domain")
             val connModeVal = it.getStringExtra("connectionMode") ?: "RDP"
             val resolutionVal = it.getStringExtra("resolution")
+            val widthVal = it.getStringExtra("width") ?: it.getStringExtra("desktopwidth")
+            val heightVal = it.getStringExtra("height") ?: it.getStringExtra("desktopheight")
             val autoconnectVal = it.getBooleanExtra("autoconnect", false) || it.getStringExtra("autoconnect") == "true"
             
             if (!hostVal.isNullOrEmpty()) {
@@ -174,7 +176,17 @@ class MainActivity : ComponentActivity() {
                     if (usernameVal != null) putString("username", usernameVal)
                     if (passwordVal != null) putString("password", passwordVal)
                     if (domainVal != null) putString("domain", domainVal)
-                    if (resolutionVal != null) putString("resolution", resolutionVal)
+                    if (widthVal != null) putString("customWidth", widthVal)
+                    if (heightVal != null) putString("customHeight", heightVal)
+                    if (resolutionVal != null) {
+                        viewModel.setResolution(resolutionVal)
+                        putString("resolution", viewModel.selectedResolution)
+                    } else if (widthVal != null && heightVal != null) {
+                        viewModel.customWidth = widthVal
+                        viewModel.customHeight = heightVal
+                        viewModel.selectedResolution = "Custom"
+                        putString("resolution", "Custom")
+                    }
                     putString("connectionMode", connModeVal)
                     apply()
                 }
@@ -185,7 +197,13 @@ class MainActivity : ComponentActivity() {
                 if (usernameVal != null) viewModel.username = usernameVal
                 if (passwordVal != null) viewModel.password = passwordVal
                 if (domainVal != null) viewModel.domain = domainVal
-                if (resolutionVal != null) viewModel.selectedResolution = resolutionVal
+                if (widthVal != null) viewModel.customWidth = widthVal
+                if (heightVal != null) viewModel.customHeight = heightVal
+                if (resolutionVal != null) {
+                    viewModel.setResolution(resolutionVal)
+                } else if (widthVal != null && heightVal != null) {
+                    viewModel.selectedResolution = "Custom"
+                }
                 viewModel.connectionMode = connModeVal
                 
 
@@ -354,9 +372,11 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                     viewModel.domain = rdpDomain
                     viewModel.connectionMode = detectedMode
                     if (fileRes.isNotEmpty()) {
-                        viewModel.selectedResolution = fileRes
+                        viewModel.setResolution(fileRes)
                     } else if (fileWidth.isNotEmpty() && fileHeight.isNotEmpty()) {
-                        viewModel.selectedResolution = "${fileWidth}x${fileHeight}"
+                        viewModel.customWidth = fileWidth
+                        viewModel.customHeight = fileHeight
+                        viewModel.selectedResolution = "Custom"
                     }
                     
                     // Auto connect
@@ -428,7 +448,10 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             viewModel.password = sharedPrefs.getString("password", "") ?: ""
             viewModel.domain = sharedPrefs.getString("domain", "") ?: ""
             viewModel.connectionMode = sharedPrefs.getString("connectionMode", "RDP") ?: "RDP"
-            viewModel.selectedResolution = sharedPrefs.getString("resolution", "1920x1080 (FHD)") ?: "1920x1080 (FHD)"
+            viewModel.customWidth = sharedPrefs.getString("customWidth", "1920") ?: "1920"
+            viewModel.customHeight = sharedPrefs.getString("customHeight", "1080") ?: "1080"
+            val savedRes = sharedPrefs.getString("resolution", "1920x1080 (FHD)") ?: "1920x1080 (FHD)"
+            viewModel.setResolution(savedRes)
         }
     }
 
@@ -656,10 +679,11 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                 "1280x720 (HD)",
                 "2560x1440 (2K)",
                 "1024x768 (SD)",
-                "Native Display"
+                "Native Display",
+                "Custom"
             )
 
-            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
+            Box(modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp)) {
                 OutlinedButton(
                     onClick = { resolutionExpanded = true },
                     modifier = Modifier.fillMaxWidth().height(54.dp),
@@ -675,7 +699,11 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         Column {
                             Text("Resolution", fontSize = 10.sp, color = Color(0xFF94A3B8))
                             Text(
-                                text = viewModel.selectedResolution,
+                                text = if (viewModel.selectedResolution == "Custom") {
+                                    "Custom (${viewModel.customWidth}x${viewModel.customHeight})"
+                                } else {
+                                    viewModel.selectedResolution
+                                },
                                 color = Color.White,
                                 fontSize = 14.sp
                             )
@@ -706,6 +734,44 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                 }
             }
 
+            if (viewModel.selectedResolution == "Custom") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = viewModel.customWidth,
+                        onValueChange = { viewModel.customWidth = it.filter { c -> c.isDigit() } },
+                        label = { Text("Width", color = Color(0xFF94A3B8)) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                    OutlinedTextField(
+                        value = viewModel.customHeight,
+                        onValueChange = { viewModel.customHeight = it.filter { c -> c.isDigit() } },
+                        label = { Text("Height", color = Color(0xFF94A3B8)) },
+                        modifier = Modifier.weight(1f),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = MaterialTheme.colorScheme.primary,
+                            unfocusedBorderColor = Color(0xFF475569),
+                            focusedTextColor = Color.White,
+                            unfocusedTextColor = Color.White
+                        )
+                    )
+                }
+            }
+
             Button(
                 onClick = {
                     // Save last inputted values to SharedPreferences
@@ -717,6 +783,8 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         putString("domain", domain)
                         putString("connectionMode", connectionMode)
                         putString("resolution", viewModel.selectedResolution)
+                        putString("customWidth", viewModel.customWidth)
+                        putString("customHeight", viewModel.customHeight)
                         apply()
                     }
 

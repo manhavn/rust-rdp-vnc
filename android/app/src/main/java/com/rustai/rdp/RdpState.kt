@@ -37,11 +37,43 @@ class RdpViewModel : RdpClient.Callback {
     var domain by mutableStateOf("")
     var connectionMode by mutableStateOf("RDP")
     var selectedResolution by mutableStateOf("1920x1080 (FHD)")
+    var customWidth by mutableStateOf("1920")
+    var customHeight by mutableStateOf("1080")
 
     var cursorType by mutableStateOf(0)
     var cursorBitmap: Bitmap? by mutableStateOf(null)
     var cursorHotX by mutableStateOf(0)
     var cursorHotY by mutableStateOf(0)
+
+    fun setResolution(resStr: String) {
+        if (resStr.isEmpty()) return
+        val knownPresets = listOf(
+            "1920x1080 (FHD)",
+            "1280x720 (HD)",
+            "2560x1440 (2K)",
+            "1024x768 (SD)",
+            "Native Display"
+        )
+        if (resStr in knownPresets) {
+            selectedResolution = resStr
+        } else if (resStr == "Custom" || resStr.startsWith("Custom")) {
+            selectedResolution = "Custom"
+        } else if (resStr.contains("x")) {
+            try {
+                val cleanStr = resStr.split(" ")[0]
+                val parts = cleanStr.split("x")
+                val w = parts[0].trim().toInt()
+                val h = parts[1].trim().toInt()
+                customWidth = w.toString()
+                customHeight = h.toString()
+                selectedResolution = "Custom"
+            } catch (e: Exception) {
+                selectedResolution = "Custom"
+            }
+        } else {
+            selectedResolution = resStr
+        }
+    }
 
     fun calculateTargetResolution(metrics: android.util.DisplayMetrics): Pair<Int, Int> {
         val option = selectedResolution
@@ -53,6 +85,11 @@ class RdpViewModel : RdpClient.Callback {
                 val alignedW = ((rawW + 3) / 4) * 4
                 val alignedH = ((rawH + 3) / 4) * 4
                 Pair(maxOf(alignedW, 640), maxOf(alignedH, 480))
+            }
+            option == "Custom" || option.startsWith("Custom") -> {
+                val w = customWidth.toIntOrNull()?.coerceIn(320, 8192) ?: 1920
+                val h = customHeight.toIntOrNull()?.coerceIn(240, 8192) ?: 1080
+                Pair(w, h)
             }
             option.contains("x") -> {
                 try {
