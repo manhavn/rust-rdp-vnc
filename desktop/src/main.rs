@@ -1243,20 +1243,20 @@ impl DesktopApp {
         tab.keyboard_state = RemoteKeyboardState::default();
     }
 
-    fn start_connect(&mut self) {
-        if !self.can_connect() {
+    fn start_connect_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() || !self.tabs[index].can_connect() {
             return;
         }
 
         // Drop any leftover backend session from a prior Failed attempt on this tab.
-        if let Some(old) = self.tab_mut().backend_session_id.take() {
+        if let Some(old) = self.tabs[index].backend_session_id.take() {
             disconnect_session_id(old);
         }
 
         self.save_app_prefs();
 
         let (host, port, username, password, domain, mode, width, height, endpoint, shared) = {
-            let tab = self.tab();
+            let tab = &self.tabs[index];
             let default_port = if tab.prefs.mode == "VNC" { 5900 } else { 3389 };
             let port = tab.prefs.port.parse::<i32>().unwrap_or(default_port);
             let width = tab
@@ -1300,20 +1300,29 @@ impl DesktopApp {
         let session_id = connect_session(
             host, port, username, password, domain, width, height, mode, cb,
         );
-        self.tab_mut().backend_session_id = Some(session_id);
+        self.tabs[index].backend_session_id = Some(session_id);
+        if index == self.active_tab {
+            set_active_session(session_id);
+        } else if let Some(active_sid) = self.tabs[self.active_tab].backend_session_id {
+            set_active_session(active_sid);
+        }
     }
 
-    /// Disconnect the active tab's session (keeps the tab / form).
-    fn disconnect(&mut self, ctx: &egui::Context) {
-        if self.view_fullscreen {
-            self.exit_view_fullscreen(ctx);
-        } else {
+    fn start_connect(&mut self) {
+        self.start_connect_tab(self.active_tab);
+    }
+
+    fn disconnect_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if index == self.active_tab {
             self.release_remote_input_state();
         }
-        if let Some(sid) = self.tab_mut().backend_session_id.take() {
+        if let Some(sid) = self.tabs[index].backend_session_id.take() {
             disconnect_session_id(sid);
         }
-        let tab = self.tab_mut();
+        let tab = &mut self.tabs[index];
         *tab.shared.state.lock() = ConnectionState::Idle;
         *tab.shared.status.lock() = "Disconnected".into();
         tab.left_down = false;
@@ -1322,6 +1331,14 @@ impl DesktopApp {
         tab.extra1_down = false;
         tab.extra2_down = false;
         tab.last_mouse = None;
+    }
+
+    /// Disconnect the active tab's session (keeps the tab / form).
+    fn disconnect(&mut self, ctx: &egui::Context) {
+        if self.view_fullscreen {
+            self.exit_view_fullscreen(ctx);
+        }
+        self.disconnect_tab(self.active_tab);
         self.show_sidebar = true;
     }
 
@@ -2860,6 +2877,7 @@ impl DesktopApp {
             let popup_w = (screen_rect.width() * 0.90).max(280.0);
             let popup_h = (screen_rect.height() * 0.90).max(200.0);
             let mut close_tab_index: Option<usize> = None;
+            let mut toggle_conn_tab_index: Option<usize> = None;
 
             egui::Area::new(egui::Id::new("fs_tabs_popup_area"))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -2934,6 +2952,7 @@ impl DesktopApp {
                                                 let card_w = 230.0;
                                                 let card_h = 88.0;
                                                 let mut card_close_clicked = false;
+                                                let mut card_switch_clicked = false;
 
                                                 let (card_rect, card_response) = ui.allocate_exact_size(
                                                     Vec2::new(card_w, card_h),
@@ -3004,6 +3023,65 @@ impl DesktopApp {
                                                                 card_close_clicked = true;
                                                             }
 
+                                                            // Switch button: Connect (Play icon, green on hover) / Disconnect (Stop icon, yellow on hover)
+                                                            let is_connected = tab.is_busy();
+                                                            let (switch_rect, switch_resp) = ui
+                                                                .allocate_exact_size(
+                                                                    Vec2::splat(18.0),
+                                                                    egui::Sense::click(),
+                                                                );
+                                                            let switch_resp = switch_resp.on_hover_text(
+                                                                if is_connected {
+                                                                    "Disconnect"
+                                                                } else {
+                                                                    "Connect"
+                                                                },
+                                                            );
+                                                            let is_switch_hovered = switch_resp.hovered();
+
+                                                            if is_switch_hovered {
+                                                                let bg_color = if is_connected {
+                                                                    Color32::from_rgb(225, 160, 0)
+                                                                } else {
+                                                                    Color32::from_rgb(38, 162, 105)
+                                                                };
+                                                                ui.painter().circle_filled(
+                                                                    switch_rect.center(),
+                                                                    8.0,
+                                                                    bg_color,
+                                                                );
+                                                            }
+
+                                                            let icon_color = if is_switch_hovered {
+                                                                Color32::WHITE
+                                                            } else {
+                                                                theme::TEXT_DIM
+                                                            };
+
+                                                            let c = switch_rect.center();
+                                                            if is_connected {
+                                                                // Stop square icon
+                                                                let stop_rect = egui::Rect::from_center_size(
+                                                                    c,
+                                                                    Vec2::splat(6.0),
+                                                                );
+                                                                ui.painter().rect_filled(stop_rect, 1.0, icon_color);
+                                                            } else {
+                                                                // Play triangle icon (pointing right)
+                                                                let p1 = c + Vec2::new(-2.5, -3.5);
+                                                                let p2 = c + Vec2::new(3.5, 0.0);
+                                                                let p3 = c + Vec2::new(-2.5, 3.5);
+                                                                ui.painter().add(egui::Shape::convex_polygon(
+                                                                    vec![p1, p2, p3],
+                                                                    icon_color,
+                                                                    egui::Stroke::NONE,
+                                                                ));
+                                                            }
+
+                                                            if switch_resp.clicked() {
+                                                                card_switch_clicked = true;
+                                                            }
+
                                                             ui.add_space(4.0);
                                                             ui.label(
                                                                 RichText::new(format!("• {}", tab.prefs.mode))
@@ -3034,7 +3112,9 @@ impl DesktopApp {
                                                     );
                                                 }
 
-                                                if card_close_clicked {
+                                                if card_switch_clicked {
+                                                    toggle_conn_tab_index = Some(i);
+                                                } else if card_close_clicked {
                                                     close_tab_index = Some(i);
                                                 } else if card_response.clicked() {
                                                     select_tab_index = Some(i);
@@ -3046,6 +3126,14 @@ impl DesktopApp {
                             });
                         });
                 });
+
+            if let Some(i) = toggle_conn_tab_index {
+                if self.tabs[i].is_busy() {
+                    self.disconnect_tab(i);
+                } else {
+                    self.start_connect_tab(i);
+                }
+            }
 
             if let Some(i) = close_tab_index {
                 self.request_close_tab(i, ctx);
