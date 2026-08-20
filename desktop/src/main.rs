@@ -256,7 +256,7 @@ impl Default for Prefs {
             height: "1080".into(),
             enable_hover_throttle: false,
             hover_send_interval_ms: 1000,
-            disable_rust_log: false,
+            disable_rust_log: true,
         }
     }
 }
@@ -275,7 +275,7 @@ impl Default for AppSession {
             active_tab: 0,
             enable_hover_throttle: false,
             hover_send_interval_ms: 1000,
-            disable_rust_log: false,
+            disable_rust_log: true,
             tabs: vec![Prefs::default()],
         }
     }
@@ -297,7 +297,7 @@ impl AppSession {
             active_tab: 0,
             enable_hover_throttle: false,
             hover_send_interval_ms: 1000,
-            disable_rust_log: false,
+            disable_rust_log: true,
             tabs: Vec::new(),
         };
 
@@ -344,7 +344,7 @@ impl AppSession {
                             p.hover_send_interval_ms = v.parse().unwrap_or(1000)
                         }
                         "disable_rust_log" | "disable_frame_complete_log" => {
-                            p.disable_rust_log = v.parse().unwrap_or(false)
+                            p.disable_rust_log = v.parse().unwrap_or(true)
                         }
                         _ => {}
                     }
@@ -362,7 +362,7 @@ impl AppSession {
                             fallback_single.hover_send_interval_ms = ms;
                         }
                         "disable_rust_log" | "disable_frame_complete_log" => {
-                            let b = v.parse().unwrap_or(false);
+                            let b = v.parse().unwrap_or(true);
                             session.disable_rust_log = b;
                             fallback_single.disable_rust_log = b;
                         }
@@ -908,6 +908,10 @@ impl DesktopApp {
             return;
         }
         self.active_tab = index;
+        self.enable_hover_throttle = self.tabs[index].prefs.enable_hover_throttle;
+        self.hover_send_interval_ms = self.tabs[index].prefs.hover_send_interval_ms;
+        self.disable_rust_log = self.tabs[index].prefs.disable_rust_log;
+        rust_rdp::set_disable_rust_log(self.disable_rust_log);
         if let Some(sid) = self.tabs[index].backend_session_id {
             set_active_session(sid);
         } else {
@@ -3735,5 +3739,20 @@ mode=VNC
         assert_eq!(session.tabs.len(), 1);
         assert_eq!(session.tabs[0].host, "192.168.1.100");
         assert_eq!(session.tabs[0].port, "3389");
+        assert_eq!(session.tabs[0].disable_rust_log, true);
+    }
+
+    #[test]
+    fn app_session_defaults_disable_rust_log_to_true() {
+        let default_prefs = Prefs::default();
+        assert_eq!(default_prefs.disable_rust_log, true);
+
+        let default_session = AppSession::default();
+        assert_eq!(default_session.disable_rust_log, true);
+
+        let input_false = "disable_rust_log=false\n[tab]\nhost=192.168.1.100\ndisable_rust_log=false\n";
+        let session_false = AppSession::parse(input_false);
+        assert_eq!(session_false.disable_rust_log, false);
+        assert_eq!(session_false.tabs[0].disable_rust_log, false);
     }
 }

@@ -12,7 +12,7 @@ use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 
-static DISABLE_RUST_LOG: AtomicBool = AtomicBool::new(false);
+static DISABLE_RUST_LOG: AtomicBool = AtomicBool::new(true);
 
 pub fn set_disable_rust_log(disable: bool) {
     DISABLE_RUST_LOG.store(disable, AtomicOrdering::Relaxed);
