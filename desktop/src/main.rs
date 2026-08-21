@@ -2429,6 +2429,7 @@ impl DesktopApp {
         }
         if connected && (view_focused || view_fullscreen) {
             self.remote_input_active = true;
+            self.system_input_capture.set_captured(true);
             let modifiers = ui.input(|i| i.modifiers);
             let native_super = self.system_input_capture.super_pressed();
             self.sync_modifiers(modifiers, native_super);
@@ -2705,6 +2706,12 @@ impl DesktopApp {
                 }
             }
         }
+
+        // Consume all input events, touchpad scroll, and gestures so no other UI components or local app shortcuts intercept them while in remote view.
+        ui.input_mut(|i| {
+            i.events.clear();
+            i.raw_scroll_delta = egui::Vec2::ZERO;
+        });
     }
 
     // ── Global shortcuts ────────────────────────────────────────────────────

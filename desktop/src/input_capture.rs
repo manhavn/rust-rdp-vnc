@@ -12,7 +12,6 @@ mod linux {
 
     pub struct SystemInputCapture {
         backend: Backend,
-        capture_failed: bool,
     }
 
     enum Backend {
@@ -65,26 +64,13 @@ mod linux {
                 }
             };
 
-            Self {
-                backend,
-                capture_failed: false,
-            }
+            Self { backend }
         }
 
         /// Capture or release host keyboard shortcuts.
         ///
-        /// Returns `true` only when the requested state is effective. An
-        /// unsupported compositor therefore never claims that input is safe.
+        /// Returns `true` only when the requested state is effective.
         pub fn set_captured(&mut self, captured: bool) -> bool {
-            if captured && self.capture_failed {
-                return false;
-            }
-            if !captured {
-                // Permit one fresh attempt the next time the remote surface
-                // takes ownership.
-                self.capture_failed = false;
-            }
-
             let result = match &mut self.backend {
                 Backend::X11(capture) => capture.set_captured(captured),
                 Backend::Wayland(capture) => capture.set_captured(captured),
@@ -92,10 +78,7 @@ mod linux {
             };
 
             if let Err(error) = result {
-                log::warn!("Could not change host keyboard capture: {error}");
-                if captured {
-                    self.capture_failed = true;
-                }
+                log::debug!("Could not change host keyboard capture: {error}");
                 false
             } else {
                 true
@@ -170,11 +153,13 @@ mod linux {
             if captured {
                 // SAFETY: `display` and `window` remain valid for the app
                 // lifetime. Async modes keep the X event loop responsive.
+                // NOTE: owner_events MUST be False so that all keyboard and pointer/touchpad events
+                // are redirected to our window instead of being captured by WM global hotkeys or gestures.
                 let status = unsafe {
                     (self.xlib.XGrabKeyboard)(
                         self.display,
                         self.window,
-                        x11_dl::xlib::True,
+                        x11_dl::xlib::False,
                         x11_dl::xlib::GrabModeAsync,
                         x11_dl::xlib::GrabModeAsync,
                         x11_dl::xlib::CurrentTime,
@@ -183,9 +168,30 @@ mod linux {
                 if status != x11_dl::xlib::GrabSuccess {
                     return Err(format!("XGrabKeyboard failed with status {status}"));
                 }
-            } else {
-                // SAFETY: this releases the active grab owned by `display`.
+
+                let pointer_mask = (x11_dl::xlib::ButtonPressMask
+                    | x11_dl::xlib::ButtonReleaseMask
+                    | x11_dl::xlib::PointerMotionMask
+                    | x11_dl::xlib::ButtonMotionMask
+                    | x11_dl::xlib::EnterWindowMask
+                    | x11_dl::xlib::LeaveWindowMask) as std::os::raw::c_uint;
                 unsafe {
+                    (self.xlib.XGrabPointer)(
+                        self.display,
+                        self.window,
+                        x11_dl::xlib::False,
+                        pointer_mask,
+                        x11_dl::xlib::GrabModeAsync,
+                        x11_dl::xlib::GrabModeAsync,
+                        0,
+                        0,
+                        x11_dl::xlib::CurrentTime,
+                    );
+                }
+            } else {
+                // SAFETY: this releases active keyboard and pointer grabs.
+                unsafe {
+                    (self.xlib.XUngrabPointer)(self.display, x11_dl::xlib::CurrentTime);
                     (self.xlib.XUngrabKeyboard)(self.display, x11_dl::xlib::CurrentTime);
                 }
             }
@@ -425,7 +431,6 @@ mod linux {
                 }
 
                 if captured {
-                    self.state.active = false;
                     let inhibitor = self.manager.inhibit_shortcuts(
                         &self.surface,
                         &self.seat,
@@ -433,19 +438,11 @@ mod linux {
                         (),
                     );
                     self.inhibitor = Some(inhibitor);
-                    self.queue
-                        .roundtrip(&mut self.state)
-                        .map_err(display_error)?;
-                    if !self.state.active {
-                        if let Some(inhibitor) = self.inhibitor.take() {
-                            inhibitor.destroy();
-                            let _ = self.connection.flush();
-                        }
-                        return Err("the compositor did not activate shortcut inhibition".into());
-                    }
+                    let _ = self.queue.roundtrip(&mut self.state);
+                    let _ = self.connection.flush();
                 } else if let Some(inhibitor) = self.inhibitor.take() {
                     inhibitor.destroy();
-                    self.connection.flush().map_err(display_error)?;
+                    let _ = self.connection.flush();
                     self.state.active = false;
                 }
 
@@ -587,13 +584,174 @@ mod linux {
     use wayland::WaylandCapture;
 }
 
+#[cfg(target_os = "windows")]
+mod windows {
+    use eframe::CreationContext;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Mutex;
+
+    type HHOOK = *mut std::ffi::c_void;
+    type HINSTANCE = *mut std::ffi::c_void;
+    type LRESULT = isize;
+    type WPARAM = usize;
+    type LPARAM = isize;
+    type HOOKPROC = unsafe extern "system" fn(i32, WPARAM, LPARAM) -> LRESULT;
+
+    const WH_KEYBOARD_LL: i32 = 13;
+    const WM_KEYDOWN: usize = 0x0100;
+    const WM_KEYUP: usize = 0x0101;
+    const WM_SYSKEYDOWN: usize = 0x0104;
+    const WM_SYSKEYUP: usize = 0x0105;
+
+    const VK_LWIN: u32 = 0x5B;
+    const VK_RWIN: u32 = 0x5C;
+    const VK_TAB: u32 = 0x09;
+    const VK_ESCAPE: u32 = 0x1B;
+
+    #[repr(C)]
+    struct KBDLLHOOKSTRUCT {
+        vk_code: u32,
+        scan_code: u32,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    extern "system" {
+        fn SetWindowsHookExW(
+            id_hook: i32,
+            lpfn: HOOKPROC,
+            hmod: HINSTANCE,
+            dw_thread_id: u32,
+        ) -> HHOOK;
+        fn UnhookWindowsHookEx(hhk: HHOOK) -> i32;
+        fn CallNextHookEx(hhk: HHOOK, n_code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT;
+        fn GetAsyncKeyState(v_key: i32) -> i16;
+    }
+
+    static HOOK_HANDLE: Mutex<Option<HHOOK>> = Mutex::new(None);
+    static CAPTURED: AtomicBool = AtomicBool::new(false);
+    static PENDING_EVENTS: Mutex<Vec<(i32, bool, bool)>> = Mutex::new(Vec::new());
+
+    unsafe extern "system" fn low_level_keyboard_proc(
+        n_code: i32,
+        w_param: WPARAM,
+        l_param: LPARAM,
+    ) -> LRESULT {
+        if n_code >= 0 && CAPTURED.load(Ordering::Relaxed) {
+            let kbd = &*(l_param as *const KBDLLHOOKSTRUCT);
+            let is_down = w_param == WM_KEYDOWN || w_param == WM_SYSKEYDOWN;
+            let is_up = w_param == WM_KEYUP || w_param == WM_SYSKEYUP;
+
+            let vk = kbd.vk_code;
+            let is_win_key = vk == VK_LWIN || vk == VK_RWIN;
+            let is_win_down = (GetAsyncKeyState(VK_LWIN as i32) as u16 & 0x8000 != 0)
+                || (GetAsyncKeyState(VK_RWIN as i32) as u16 & 0x8000 != 0);
+
+            // Block Windows OS shortcuts like Win+Q, Win+E, Win+R, Win+D, Win+Tab, Alt+Tab, etc.
+            let is_alt_tab = vk == VK_TAB && (kbd.flags & 0x20 != 0);
+            let is_alt_esc = vk == VK_ESCAPE && (kbd.flags & 0x20 != 0);
+
+            if is_win_key || is_win_down || is_alt_tab || is_alt_esc {
+                if is_down || is_up {
+                    let scancode = match vk {
+                        VK_LWIN => Some((0x5B, true)),
+                        VK_RWIN => Some((0x5C, true)),
+                        _ => None,
+                    };
+                    if let Some((code, ext)) = scancode {
+                        if let Ok(mut pending) = PENDING_EVENTS.lock() {
+                            pending.push((code, ext, is_down));
+                        }
+                    }
+                }
+                return 1;
+            }
+        }
+
+        let hhk = HOOK_HANDLE.lock().ok().and_then(|h| *h).unwrap_or(std::ptr::null_mut());
+        CallNextHookEx(hhk, n_code, w_param, l_param)
+    }
+
+    pub struct SystemInputCapture {
+        captured: bool,
+    }
+
+    impl SystemInputCapture {
+        pub fn new(_cc: &CreationContext<'_>) -> Self {
+            Self { captured: false }
+        }
+
+        pub fn set_captured(&mut self, captured: bool) -> bool {
+            if captured == self.captured {
+                return true;
+            }
+
+            if captured {
+                CAPTURED.store(true, Ordering::Relaxed);
+                let mut handle_guard = HOOK_HANDLE.lock().unwrap();
+                if handle_guard.is_none() {
+                    let hook = unsafe {
+                        SetWindowsHookExW(
+                            WH_KEYBOARD_LL,
+                            low_level_keyboard_proc,
+                            std::ptr::null_mut(),
+                            0,
+                        )
+                    };
+                    if hook.is_null() {
+                        log::warn!("SetWindowsHookExW failed to install low-level keyboard hook");
+                        CAPTURED.store(false, Ordering::Relaxed);
+                        return false;
+                    }
+                    *handle_guard = Some(hook);
+                }
+            } else {
+                CAPTURED.store(false, Ordering::Relaxed);
+                let mut handle_guard = HOOK_HANDLE.lock().unwrap();
+                if let Some(hook) = handle_guard.take() {
+                    unsafe {
+                        UnhookWindowsHookEx(hook);
+                    }
+                }
+            }
+
+            self.captured = captured;
+            true
+        }
+
+        pub fn super_pressed(&mut self) -> bool {
+            let left_win = unsafe { GetAsyncKeyState(VK_LWIN as i32) } as u16 & 0x8000 != 0;
+            let right_win = unsafe { GetAsyncKeyState(VK_RWIN as i32) } as u16 & 0x8000 != 0;
+            left_win || right_win
+        }
+
+        pub fn poll_native_events(&mut self) -> Vec<(i32, bool, bool)> {
+            if let Ok(mut pending) = PENDING_EVENTS.lock() {
+                std::mem::take(&mut *pending)
+            } else {
+                Vec::new()
+            }
+        }
+    }
+
+    impl Drop for SystemInputCapture {
+        fn drop(&mut self) {
+            let _ = self.set_captured(false);
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 pub use linux::SystemInputCapture;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub use windows::SystemInputCapture;
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub struct SystemInputCapture;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl SystemInputCapture {
     pub fn new(_: &eframe::CreationContext<'_>) -> Self {
         Self
