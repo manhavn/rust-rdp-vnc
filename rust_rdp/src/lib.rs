@@ -3,7 +3,7 @@ mod android_jni;
 pub mod c_ffi;
 mod callback;
 
-pub use callback::{SessionCallback, SharedCallback};
+pub use callback::{is_rust_log_message, SessionCallback, SharedCallback};
 
 use lazy_static::lazy_static;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
@@ -1467,7 +1467,7 @@ pub fn connect_session(
                             drdynvc_client.attach_dynamic_channel(gfx_client);
                             connector.attach_static_channel(drdynvc_client);
 
-                            notify_state_change(callback_clone.as_ref(), 1, &format!("Static channels count before connect_begin: {}", connector.static_channels.values().count()));
+                            log::debug!("Static channels count before connect_begin: {}", connector.static_channels.values().count());
                             let mut framed = TokioFramed::new(tcp_stream);
 
                             let should_upgrade = match connect_begin(&mut framed, &mut connector).await {
@@ -1542,7 +1542,7 @@ pub fn connect_session(
 
                             let mut network_client = SimpleNetworkClient;
                             let rdp_server_name = RdpServerName::new(host_str.clone());
-                            notify_state_change(callback_clone.as_ref(), 1, &format!("Static channels count before connect_finalize: {}", connector.static_channels.values().count()));
+                            log::debug!("Static channels count before connect_finalize: {}", connector.static_channels.values().count());
 
                             match connect_finalize(
                                 upgraded,

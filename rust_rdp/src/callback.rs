@@ -25,8 +25,12 @@ pub trait SessionCallback: Send + Sync {
 
 pub type SharedCallback = Arc<dyn SessionCallback>;
 
+pub fn is_rust_log_message(message: &str) -> bool {
+    message.trim_start().to_ascii_lowercase().starts_with("[rust log]")
+}
+
 pub fn notify_state_change(callback: &dyn SessionCallback, state: i32, message: &str) {
-    if message.starts_with("[Rust Log]") && crate::is_rust_log_disabled() {
+    if is_rust_log_message(message) && crate::is_rust_log_disabled() {
         return;
     }
     callback.on_state_changed(state, message);

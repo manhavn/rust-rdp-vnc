@@ -9,9 +9,10 @@ use eframe::egui::{
 use input_capture::SystemInputCapture;
 use parking_lot::Mutex;
 use rust_rdp::{
-    connect_session, disconnect_session, disconnect_session_id, init_runtime, send_key_event,
-    send_mouse_event, send_mouse_horizontal_wheel_event, send_mouse_wheel_event,
-    send_scancode_event, set_active_session, SessionCallback,
+    connect_session, disconnect_session, disconnect_session_id, init_runtime, is_rust_log_disabled,
+    is_rust_log_message, send_key_event, send_mouse_event, send_mouse_horizontal_wheel_event,
+    send_mouse_wheel_event, send_scancode_event, set_active_session, set_disable_rust_log,
+    SessionCallback,
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -39,7 +40,7 @@ mod theme {
     pub const ERROR_BG: Color32 = Color32::from_rgb(0x3D, 0x1A, 0x1A);
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnectionState {
     Idle,
     Connecting,
@@ -169,8 +170,14 @@ impl SessionCallback for UiCallback {
             _ => ConnectionState::Idle,
         };
         *self.ui.state.lock() = conn;
+        let is_rust_log = is_rust_log_message(message);
+        if is_rust_log && is_rust_log_disabled() {
+            return;
+        }
         *self.ui.status.lock() = message.to_string();
-        log::info!("state={state} msg={message}");
+        if !is_rust_log {
+            log::info!("state={state} msg={message}");
+        }
     }
 
     fn on_frame_decoded(&self, pixels: &[i32], _x: i32, _y: i32, width: i32, height: i32) {
@@ -317,8 +324,12 @@ impl AppSession {
                 if let Some(t) = current_tab.take() {
                     session.tabs.push(t);
                 }
-                current_tab = Some(Prefs::default());
-                continue;
+                current_tab = Some(Prefs {
+                    enable_hover_throttle: session.enable_hover_throttle,
+                    hover_send_interval_ms: session.hover_send_interval_ms,
+                    disable_rust_log: session.disable_rust_log,
+                    ..Prefs::default()
+                });
             }
 
             if let Some((k, v)) = line.split_once('=') {
@@ -397,6 +408,12 @@ impl AppSession {
 
         if session.active_tab >= session.tabs.len() {
             session.active_tab = session.tabs.len().saturating_sub(1);
+        }
+
+        if let Some(active) = session.tabs.get(session.active_tab) {
+            session.disable_rust_log = active.disable_rust_log;
+            session.enable_hover_throttle = active.enable_hover_throttle;
+            session.hover_send_interval_ms = active.hover_send_interval_ms;
         }
 
         session
@@ -823,10 +840,6 @@ impl DesktopApp {
             .options_mut(|options| options.zoom_with_keyboard = false);
 
         let session = AppSession::load();
-        let enable_hover_throttle = session.enable_hover_throttle;
-        let hover_send_interval_ms = session.hover_send_interval_ms;
-        let disable_rust_log = session.disable_rust_log;
-        rust_rdp::set_disable_rust_log(disable_rust_log);
 
         let mut tabs = Vec::new();
         let mut next_id = 1u64;
@@ -835,9 +848,18 @@ impl DesktopApp {
             next_id += 1;
         }
 
-        let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
+        if tabs.is_empty() {
+            tabs.push(ConnectionTab::new(next_id, Prefs::default()));
+            next_id += 1;
+        }
 
-        Self {
+        let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
+        let enable_hover_throttle = tabs[active_tab].prefs.enable_hover_throttle;
+        let hover_send_interval_ms = tabs[active_tab].prefs.hover_send_interval_ms;
+        let disable_rust_log = tabs[active_tab].prefs.disable_rust_log;
+        set_disable_rust_log(disable_rust_log);
+
+        let app = Self {
             tabs,
             active_tab,
             next_tab_id: next_id,
@@ -858,9 +880,26 @@ impl DesktopApp {
             enable_hover_throttle,
             hover_send_interval_ms,
             disable_rust_log,
+        };
+
+        if disable_rust_log {
+            for i in 0..app.tabs.len() {
+                app.clean_rust_log_status(i);
+            }
         }
+
+        app
     }
 
+    fn clean_rust_log_status(&self, tab_idx: usize) {
+        if let Some(tab) = self.tabs.get(tab_idx) {
+            let mut status = tab.shared.status.lock();
+            if is_rust_log_message(&status) {
+                let state = *tab.shared.state.lock();
+                *status = state.label().to_string();
+            }
+        }
+    }
     /// Save current session state (all open tabs + active tab) under XDG config.
     fn save_app_prefs(&self) {
         let Some(path) = Prefs::path() else {
@@ -876,7 +915,7 @@ impl DesktopApp {
         text.push_str(&format!("disable_rust_log={}\n", self.disable_rust_log));
         text.push_str("\n");
 
-        for tab in &self.tabs {
+        for (i, tab) in self.tabs.iter().enumerate() {
             text.push_str("[tab]\n");
             text.push_str(&format!("host={}\n", tab.prefs.host));
             text.push_str(&format!("port={}\n", tab.prefs.port));
@@ -886,9 +925,24 @@ impl DesktopApp {
             text.push_str(&format!("mode={}\n", tab.prefs.mode));
             text.push_str(&format!("width={}\n", tab.prefs.width));
             text.push_str(&format!("height={}\n", tab.prefs.height));
-            text.push_str(&format!("enable_hover_throttle={}\n", tab.prefs.enable_hover_throttle));
-            text.push_str(&format!("hover_send_interval_ms={}\n", tab.prefs.hover_send_interval_ms));
-            text.push_str(&format!("disable_rust_log={}\n", tab.prefs.disable_rust_log));
+            let throttle = if i == self.active_tab {
+                self.enable_hover_throttle
+            } else {
+                tab.prefs.enable_hover_throttle
+            };
+            let interval = if i == self.active_tab {
+                self.hover_send_interval_ms
+            } else {
+                tab.prefs.hover_send_interval_ms
+            };
+            let no_log = if i == self.active_tab {
+                self.disable_rust_log
+            } else {
+                tab.prefs.disable_rust_log
+            };
+            text.push_str(&format!("enable_hover_throttle={}\n", throttle));
+            text.push_str(&format!("hover_send_interval_ms={}\n", interval));
+            text.push_str(&format!("disable_rust_log={}\n", no_log));
             text.push_str("\n");
         }
 
@@ -911,7 +965,10 @@ impl DesktopApp {
         self.enable_hover_throttle = self.tabs[index].prefs.enable_hover_throttle;
         self.hover_send_interval_ms = self.tabs[index].prefs.hover_send_interval_ms;
         self.disable_rust_log = self.tabs[index].prefs.disable_rust_log;
-        rust_rdp::set_disable_rust_log(self.disable_rust_log);
+        set_disable_rust_log(self.disable_rust_log);
+        if self.disable_rust_log {
+            self.clean_rust_log_status(index);
+        }
         if let Some(sid) = self.tabs[index].backend_session_id {
             set_active_session(sid);
         } else {
@@ -1097,6 +1154,10 @@ impl DesktopApp {
                     tab.prefs = loaded;
                     *tab.shared.status.lock() = msg.clone();
                 }
+                self.disable_rust_log = self.tab().prefs.disable_rust_log;
+                self.enable_hover_throttle = self.tab().prefs.enable_hover_throttle;
+                self.hover_send_interval_ms = self.tab().prefs.hover_send_interval_ms;
+                set_disable_rust_log(self.disable_rust_log);
                 self.save_app_prefs();
                 self.show_toast(msg, ToastKind::Info);
                 self.start_connect();
@@ -1164,6 +1225,10 @@ impl DesktopApp {
             return;
         }
         self.tab_mut().prefs = Prefs::default();
+        self.disable_rust_log = self.tab().prefs.disable_rust_log;
+        self.enable_hover_throttle = self.tab().prefs.enable_hover_throttle;
+        self.hover_send_interval_ms = self.tab().prefs.hover_send_interval_ms;
+        set_disable_rust_log(self.disable_rust_log);
         *self.tab().shared.status.lock() = "Form cleared".into();
         self.save_app_prefs();
         self.show_toast("Form cleared", ToastKind::Info);
@@ -1306,6 +1371,7 @@ impl DesktopApp {
         );
         self.tabs[index].backend_session_id = Some(session_id);
         if index == self.active_tab {
+            set_disable_rust_log(self.tabs[index].prefs.disable_rust_log);
             set_active_session(session_id);
         } else if let Some(active_sid) = self.tabs[self.active_tab].backend_session_id {
             set_active_session(active_sid);
@@ -1599,8 +1665,11 @@ impl DesktopApp {
                     )
                     .changed()
                 {
-                    rust_rdp::set_disable_rust_log(self.disable_rust_log);
+                    set_disable_rust_log(self.disable_rust_log);
                     self.tab_mut().prefs.disable_rust_log = self.disable_rust_log;
+                    if self.disable_rust_log {
+                        self.clean_rust_log_status(self.active_tab);
+                    }
                     self.save_app_prefs();
                 }
             });
@@ -3761,5 +3830,56 @@ mode=VNC
         let session_false = AppSession::parse(input_false);
         assert_eq!(session_false.disable_rust_log, false);
         assert_eq!(session_false.tabs[0].disable_rust_log, false);
+    }
+
+    #[test]
+    fn is_rust_log_message_detection() {
+        assert!(is_rust_log_message("[Rust Log] on_frame_complete: 123"));
+        assert!(is_rust_log_message("[rust log] Bitmap update"));
+        assert!(is_rust_log_message("  [RUST LOG] Reader loop started"));
+        assert!(!is_rust_log_message("Connected successfully"));
+        assert!(!is_rust_log_message("Connecting to 192.168.1.1:3389"));
+        assert!(!is_rust_log_message("Failed to connect TCP: Connection refused"));
+    }
+
+    #[test]
+    fn ui_callback_suppresses_rust_log_when_disabled() {
+        set_disable_rust_log(true);
+        let shared = SharedUi::new();
+        let cb = UiCallback { ui: shared.clone() };
+
+        cb.on_state_changed(2, "Connected successfully");
+        assert_eq!(*shared.status.lock(), "Connected successfully");
+        assert_eq!(*shared.state.lock(), ConnectionState::Connected);
+
+        // [Rust Log] should not overwrite status when disabled
+        cb.on_state_changed(2, "[Rust Log] on_frame_complete: frame_id=999");
+        assert_eq!(*shared.status.lock(), "Connected successfully");
+
+        // Normal state changes should still update status
+        cb.on_state_changed(0, "Disconnected");
+        assert_eq!(*shared.status.lock(), "Disconnected");
+        assert_eq!(*shared.state.lock(), ConnectionState::Idle);
+    }
+
+    #[test]
+    fn app_session_parses_mixed_disable_rust_log_tabs() {
+        let input = r#"
+active_tab=1
+
+[tab]
+host=192.168.1.10
+disable_rust_log=false
+
+[tab]
+host=10.0.0.5
+disable_rust_log=true
+"#;
+        let session = AppSession::parse(input);
+        assert_eq!(session.active_tab, 1);
+        assert_eq!(session.tabs[0].disable_rust_log, false);
+        assert_eq!(session.tabs[1].disable_rust_log, true);
+        // Active tab is tab 1, so session.disable_rust_log should match tab 1
+        assert_eq!(session.disable_rust_log, true);
     }
 }
