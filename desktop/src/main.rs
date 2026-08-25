@@ -2980,26 +2980,11 @@ impl DesktopApp {
             let mut close_tab_index: Option<usize> = None;
             let mut toggle_conn_tab_index: Option<usize> = None;
 
-            // Fullscreen dark backdrop to catch outside clicks and visually isolate the modal
-            let backdrop_resp = egui::Area::new(egui::Id::new("fs_tabs_popup_backdrop"))
-                .fixed_pos(screen_rect.min)
-                .order(egui::Order::Foreground)
-                .show(ctx, |ui| {
-                    let (rect, resp) =
-                        ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
-                    ui.painter()
-                        .rect_filled(rect, 0.0, Color32::from_black_alpha(160));
-                    resp
-                });
-            if backdrop_resp.inner.clicked() {
-                close_popup = true;
-            }
-
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close_popup = true;
             }
 
-            egui::Area::new(egui::Id::new("fs_tabs_popup_area"))
+            let popup_area = egui::Area::new(egui::Id::new("fs_tabs_popup_area"))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .order(egui::Order::Foreground)
                 .show(ctx, |ui| {
@@ -3246,6 +3231,14 @@ impl DesktopApp {
                             });
                         });
                 });
+            let popup_rect = popup_area.response.rect;
+            if let Some(pos) = pointer {
+                if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                    && !popup_rect.contains(pos)
+                {
+                    close_popup = true;
+                }
+            }
 
             if let Some(i) = toggle_conn_tab_index {
                 if self.tabs[i].is_busy() {
