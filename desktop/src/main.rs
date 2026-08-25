@@ -961,6 +961,9 @@ impl DesktopApp {
         if index >= self.tabs.len() {
             return;
         }
+        if index != self.active_tab {
+            self.release_remote_input_state();
+        }
         self.active_tab = index;
         self.enable_hover_throttle = self.tabs[index].prefs.enable_hover_throttle;
         self.hover_send_interval_ms = self.tabs[index].prefs.hover_send_interval_ms;
@@ -1054,9 +1057,13 @@ impl DesktopApp {
         self.save_app_prefs();
     }
 
+    fn has_modal_open(&self) -> bool {
+        self.show_fullscreen_tabs || self.pending_close_tab_id.is_some() || self.show_about
+    }
+
     /// Keyboard is owned by the remote session (no host shortcuts).
     fn keyboard_grabbed(&self) -> bool {
-        self.view_fullscreen || self.remote_input_active
+        (self.view_fullscreen || self.remote_input_active) && !self.has_modal_open()
     }
 
     /// Hide app chrome so the remote desktop fills the client area.
@@ -2443,12 +2450,40 @@ impl DesktopApp {
         rect: egui::Rect,
         raw_scroll: Vec2,
     ) {
+        if self.has_modal_open() {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
+            self.remote_input_active = false;
+            self.release_remote_input_state();
+            return;
+        }
+
         let connected = matches!(
             *self.tab().shared.state.lock(),
             ConnectionState::Connected | ConnectionState::Connecting
         );
         let view_fullscreen = self.view_fullscreen;
         let view_focused = response.has_focus() || response.hovered();
+
+        // Prefer hover position so mouse move + wheel work without a button held.
+        let pointer = response
+            .hover_pos()
+            .or_else(|| response.interact_pointer_pos())
+            .or_else(|| ui.input(|i| i.pointer.latest_pos().filter(|p| rect.contains(*p))));
+
+        let pointer_over_exit = view_fullscreen
+            && pointer
+                .and_then(|position| {
+                    self.view_exit_overlay_rect
+                        .map(|overlay| overlay.contains(position))
+                })
+                .unwrap_or(false);
+
+        if pointer_over_exit {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
+            self.remote_input_active = false;
+            return;
+        }
+
         let custom = self.tab().shared.custom_cursor.lock().clone();
         if view_focused || view_fullscreen {
             if custom.is_some() && response.hovered() {
@@ -2509,24 +2544,10 @@ impl DesktopApp {
             }
         }
 
-        // Prefer hover position so mouse move + wheel work without a button held.
-        let pointer = response
-            .hover_pos()
-            .or_else(|| response.interact_pointer_pos())
-            .or_else(|| ui.input(|i| i.pointer.latest_pos().filter(|p| rect.contains(*p))));
-
-        let pointer_over_exit = view_fullscreen
-            && pointer
-                .and_then(|position| {
-                    self.view_exit_overlay_rect
-                        .map(|overlay| overlay.contains(position))
-                })
-                .unwrap_or(false);
-
         let enable_hover_throttle = self.enable_hover_throttle;
         let hover_send_interval_ms = self.hover_send_interval_ms;
 
-        if let Some(pos) = pointer.filter(|_| !pointer_over_exit) {
+        if let Some(pos) = pointer {
             if let Some((x, y)) = self.remote_pos(pos, rect) {
                 let tab = self.tab_mut();
                 let moved = tab
@@ -2958,6 +2979,25 @@ impl DesktopApp {
             let popup_h = (screen_rect.height() * 0.90).max(200.0);
             let mut close_tab_index: Option<usize> = None;
             let mut toggle_conn_tab_index: Option<usize> = None;
+
+            // Fullscreen dark backdrop to catch outside clicks and visually isolate the modal
+            let backdrop_resp = egui::Area::new(egui::Id::new("fs_tabs_popup_backdrop"))
+                .fixed_pos(screen_rect.min)
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(screen_rect.size(), egui::Sense::click());
+                    ui.painter()
+                        .rect_filled(rect, 0.0, Color32::from_black_alpha(160));
+                    resp
+                });
+            if backdrop_resp.inner.clicked() {
+                close_popup = true;
+            }
+
+            if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                close_popup = true;
+            }
 
             egui::Area::new(egui::Id::new("fs_tabs_popup_area"))
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
