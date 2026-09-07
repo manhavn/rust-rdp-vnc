@@ -780,6 +780,8 @@ struct DesktopApp {
     toast: Option<Toast>,
     /// Tab id waiting for “close while connected?” confirmation (× / Ctrl+W).
     pending_close_tab_id: Option<u64>,
+    /// Tab id of tab currently being dragged in the tab bar.
+    dragged_tab_id: Option<u64>,
     enable_hover_throttle: bool,
     hover_send_interval_ms: u64,
     disable_rust_log: bool,
@@ -877,6 +879,7 @@ impl DesktopApp {
             show_fullscreen_tabs: false,
             toast: None,
             pending_close_tab_id: None,
+            dragged_tab_id: None,
             enable_hover_throttle,
             hover_send_interval_ms,
             disable_rust_log,
@@ -910,8 +913,14 @@ impl DesktopApp {
         }
         let mut text = String::new();
         text.push_str(&format!("active_tab={}\n", self.active_tab));
-        text.push_str(&format!("enable_hover_throttle={}\n", self.enable_hover_throttle));
-        text.push_str(&format!("hover_send_interval_ms={}\n", self.hover_send_interval_ms));
+        text.push_str(&format!(
+            "enable_hover_throttle={}\n",
+            self.enable_hover_throttle
+        ));
+        text.push_str(&format!(
+            "hover_send_interval_ms={}\n",
+            self.hover_send_interval_ms
+        ));
         text.push_str(&format!("disable_rust_log={}\n", self.disable_rust_log));
         text.push_str("\n");
 
@@ -1052,6 +1061,72 @@ impl DesktopApp {
             if !busy {
                 self.exit_view_fullscreen(ctx);
                 self.show_sidebar = true;
+            }
+        }
+        self.save_app_prefs();
+    }
+
+    /// Move a tab from `from_idx` to `to_idx`, keeping the active tab properly tracked.
+    fn move_tab(&mut self, from_idx: usize, to_idx: usize) {
+        if from_idx == to_idx || from_idx >= self.tabs.len() || to_idx >= self.tabs.len() {
+            return;
+        }
+        let active_tab_id = self.tabs.get(self.active_tab).map(|t| t.tab_id);
+        let tab = self.tabs.remove(from_idx);
+        self.tabs.insert(to_idx, tab);
+        if let Some(id) = active_tab_id {
+            if let Some(new_active) = self.tabs.iter().position(|t| t.tab_id == id) {
+                self.active_tab = new_active;
+            }
+        }
+        self.save_app_prefs();
+    }
+
+    /// Duplicate connection settings into a new tab inserted adjacent to `index`.
+    fn duplicate_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let prefs = self.tabs[index].prefs.clone();
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.wrapping_add(1);
+        let insert_at = (index + 1).min(self.tabs.len());
+        self.tabs.insert(insert_at, ConnectionTab::new(id, prefs));
+        self.select_tab(insert_at);
+        self.save_app_prefs();
+    }
+
+    /// Close all tabs except `keep_idx`.
+    fn close_other_tabs(&mut self, keep_idx: usize, ctx: &egui::Context) {
+        if keep_idx >= self.tabs.len() {
+            return;
+        }
+        let keep_id = self.tabs[keep_idx].tab_id;
+        let mut to_close = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if tab.tab_id != keep_id {
+                to_close.push(i);
+            }
+        }
+        for i in to_close.into_iter().rev() {
+            self.close_tab(i, ctx);
+        }
+    }
+
+    /// Sort all open connection tabs alphabetically by title.
+    fn sort_tabs_by_name(&mut self) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let active_tab_id = self.tabs.get(self.active_tab).map(|t| t.tab_id);
+        self.tabs.sort_by(|a, b| {
+            let a_name = a.tab_title();
+            let b_name = b.tab_title();
+            a_name.to_lowercase().cmp(&b_name.to_lowercase())
+        });
+        if let Some(id) = active_tab_id {
+            if let Some(new_active) = self.tabs.iter().position(|t| t.tab_id == id) {
+                self.active_tab = new_active;
             }
         }
         self.save_app_prefs();
@@ -1580,6 +1655,92 @@ impl DesktopApp {
                 }
             });
 
+            ui.menu_button("Tabs", |ui| {
+                if ui.button("New connection tab\tCtrl+T").clicked() {
+                    self.new_connection_tab();
+                    if self.view_fullscreen {
+                        self.exit_view_fullscreen(ctx);
+                    }
+                    ui.close_menu();
+                }
+                if ui.button("Close tab\tCtrl+W").clicked() {
+                    let idx = self.active_tab;
+                    self.request_close_tab(idx, ctx);
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(self.tabs.len() > 1, egui::Button::new("Close other tabs"))
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    self.close_other_tabs(idx, ctx);
+                    ui.close_menu();
+                }
+                if ui.button("Duplicate current tab").clicked() {
+                    let idx = self.active_tab;
+                    self.duplicate_tab(idx);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.active_tab > 0,
+                        egui::Button::new("Move tab left\tCtrl+Shift+PgUp"),
+                    )
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    self.move_tab(idx, idx - 1);
+                    self.select_tab(idx - 1);
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        self.active_tab + 1 < self.tabs.len(),
+                        egui::Button::new("Move tab right\tCtrl+Shift+PgDn"),
+                    )
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    self.move_tab(idx, idx + 1);
+                    self.select_tab(idx + 1);
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(self.active_tab > 0, egui::Button::new("Move tab to start"))
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    self.move_tab(idx, 0);
+                    self.select_tab(0);
+                    ui.close_menu();
+                }
+                if ui
+                    .add_enabled(
+                        self.active_tab + 1 < self.tabs.len(),
+                        egui::Button::new("Move tab to end"),
+                    )
+                    .clicked()
+                {
+                    let idx = self.active_tab;
+                    let last = self.tabs.len().saturating_sub(1);
+                    self.move_tab(idx, last);
+                    self.select_tab(last);
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        self.tabs.len() > 1,
+                        egui::Button::new("Sort tabs by title (A-Z)"),
+                    )
+                    .clicked()
+                {
+                    self.sort_tabs_by_name();
+                    ui.close_menu();
+                }
+            });
+
             ui.menu_button("Actions", |ui| {
                 if ui.button("Send Ctrl+Alt+Del\tCtrl+Alt+End").clicked() {
                     send_scancode_event(0x1D, true, 1);
@@ -1804,35 +1965,95 @@ impl DesktopApp {
 
     // ── Tab bar ─────────────────────────────────────────────────────────────
 
+    fn calculate_drop_slot(tab_rects: &[egui::Rect], mouse_x: f32) -> usize {
+        if tab_rects.is_empty() {
+            return 0;
+        }
+        if mouse_x < tab_rects[0].center().x {
+            return 0;
+        }
+        if mouse_x >= tab_rects[tab_rects.len() - 1].center().x {
+            return tab_rects.len();
+        }
+        for i in 0..tab_rects.len() - 1 {
+            if mouse_x >= tab_rects[i].center().x && mouse_x < tab_rects[i + 1].center().x {
+                return i + 1;
+            }
+        }
+        tab_rects.len()
+    }
+
     fn ui_tab_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let mut select: Option<usize> = None;
         let mut double_click_tab: Option<usize> = None;
         let mut close: Option<usize> = None;
         let mut new_tab = false;
 
-        egui::ScrollArea::horizontal()
+        let mut action_move: Option<(usize, usize)> = None;
+        let mut action_duplicate: Option<usize> = None;
+        let mut action_close_others: Option<usize> = None;
+
+        let total_tabs = self.tabs.len();
+        let mut tab_rects: Vec<egui::Rect> = Vec::with_capacity(total_tabs);
+        let mut drag_started_id: Option<u64> = None;
+
+        let is_pointer_down = ctx.input(|i| i.pointer.primary_down());
+        let any_released = ctx.input(|i| i.pointer.any_released());
+        let esc_pressed = ctx.input(|i| i.key_pressed(Key::Escape));
+        let pointer_pos = ctx.input(|i| {
+            i.pointer
+                .interact_pos()
+                .or(i.pointer.latest_pos())
+                .or(i.pointer.hover_pos())
+        });
+
+        // Cancel dragging if Escape pressed
+        if esc_pressed {
+            self.dragged_tab_id = None;
+        }
+
+        let is_dragging = self.dragged_tab_id.is_some();
+
+        let _scroll_output = egui::ScrollArea::horizontal()
             .id_salt("session_tabs_scroll")
             .show(ui, |ui| {
+                // Auto-scroll when dragging near edges of tab scroll area
+                if is_dragging {
+                    if let Some(pos) = pointer_pos {
+                        let clip = ui.clip_rect();
+                        if pos.x < clip.left() + 25.0 {
+                            ui.scroll_with_delta(Vec2::new(12.0, 0.0));
+                        } else if pos.x > clip.right() - 25.0 {
+                            ui.scroll_with_delta(Vec2::new(-12.0, 0.0));
+                        }
+                    }
+                }
+
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 4.0;
 
                     for (i, tab) in self.tabs.iter().enumerate() {
                         let selected = i == self.active_tab;
+                        let is_dragged = self.dragged_tab_id == Some(tab.tab_id);
                         let title = tab.tab_title();
                         let state = *tab.shared.state.lock();
 
-                        let fill = if selected {
+                        let fill = if is_dragged {
+                            Color32::from_rgba_premultiplied(30, 30, 30, 120)
+                        } else if selected {
                             theme::PANEL_ALT
                         } else {
                             theme::PANEL
                         };
-                        let stroke = if selected {
+                        let stroke = if is_dragged {
+                            egui::Stroke::new(1.0_f32, theme::TEXT_DIM)
+                        } else if selected {
                             egui::Stroke::new(1.0_f32, theme::ACCENT)
                         } else {
                             egui::Stroke::new(1.0_f32, theme::BORDER)
                         };
 
-                        egui::Frame::new()
+                        let frame_resp = egui::Frame::new()
                             .fill(fill)
                             .stroke(stroke)
                             .corner_radius(4.0)
@@ -1851,8 +2072,10 @@ impl DesktopApp {
                                             );
                                             ui.painter().circle_filled(dot.center(), 3.0, state.color());
 
-                                            let label = RichText::new(title).small();
-                                            ui.add(egui::Label::new(if selected {
+                                            let label = RichText::new(&title).small();
+                                            ui.add(egui::Label::new(if is_dragged {
+                                                label.color(theme::TEXT_DIM)
+                                            } else if selected {
                                                 label.strong().color(theme::TEXT)
                                             } else {
                                                 label.color(theme::TEXT_DIM)
@@ -1864,16 +2087,88 @@ impl DesktopApp {
                                         .interact(
                                             tab_title_resp.rect,
                                             ui.id().with(tab.tab_id),
-                                            egui::Sense::click(),
+                                            egui::Sense::click_and_drag(),
                                         )
-                                        .on_hover_text("Switch to this connection (double-click for fullscreen)");
+                                        .on_hover_cursor(if is_dragged {
+                                            egui::CursorIcon::Grabbing
+                                        } else {
+                                            egui::CursorIcon::Grab
+                                        })
+                                        .on_hover_text(
+                                            "Switch connection (drag to reorder, right-click for options, double-click for fullscreen)",
+                                        );
 
-                                    if title_resp.clicked() {
+                                    if title_resp.drag_started() {
+                                        drag_started_id = Some(tab.tab_id);
                                         select = Some(i);
                                     }
-                                    if title_resp.double_clicked() {
-                                        double_click_tab = Some(i);
+
+                                    if self.dragged_tab_id.is_none() {
+                                        if title_resp.clicked() {
+                                            select = Some(i);
+                                        }
+                                        if title_resp.double_clicked() {
+                                            double_click_tab = Some(i);
+                                        }
                                     }
+
+                                    title_resp.context_menu(|ui| {
+                                        ui.set_min_width(160.0);
+                                        if ui
+                                            .add_enabled(i > 0, egui::Button::new("◀ Move Tab Left"))
+                                            .clicked()
+                                        {
+                                            action_move = Some((i, i - 1));
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                i + 1 < total_tabs,
+                                                egui::Button::new("▶ Move Tab Right"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action_move = Some((i, i + 1));
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .add_enabled(i > 0, egui::Button::new("⏮ Move Tab to Start"))
+                                            .clicked()
+                                        {
+                                            action_move = Some((i, 0));
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                i + 1 < total_tabs,
+                                                egui::Button::new("⏭ Move Tab to End"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action_move = Some((i, total_tabs.saturating_sub(1)));
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("🗗 Duplicate Tab").clicked() {
+                                            action_duplicate = Some(i);
+                                            ui.close_menu();
+                                        }
+                                        ui.separator();
+                                        if ui.button("✕ Close Tab\tCtrl+W").clicked() {
+                                            close = Some(i);
+                                            ui.close_menu();
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                total_tabs > 1,
+                                                egui::Button::new("✕ Close Other Tabs"),
+                                            )
+                                            .clicked()
+                                        {
+                                            action_close_others = Some(i);
+                                            ui.close_menu();
+                                        }
+                                    });
 
                                     let close_resp = ui
                                         .add(
@@ -1887,6 +2182,8 @@ impl DesktopApp {
                                     }
                                 });
                             });
+
+                        tab_rects.push(frame_resp.response.rect);
                     }
 
                     if ui
@@ -1901,6 +2198,143 @@ impl DesktopApp {
                     }
                 });
             });
+
+        if let Some(id) = drag_started_id {
+            self.dragged_tab_id = Some(id);
+        }
+
+        // Drag & drop processing
+        if let Some(drag_id) = self.dragged_tab_id {
+            if let Some(from_idx) = self.tabs.iter().position(|t| t.tab_id == drag_id) {
+                if let Some(mouse_pos) = pointer_pos {
+                    let target_slot = Self::calculate_drop_slot(&tab_rects, mouse_pos.x);
+
+                    if any_released || !is_pointer_down {
+                        // Drop occurred!
+                        let to_idx = if target_slot <= from_idx {
+                            target_slot
+                        } else {
+                            target_slot.saturating_sub(1)
+                        };
+                        if to_idx != from_idx && to_idx < self.tabs.len() {
+                            self.move_tab(from_idx, to_idx);
+                            self.select_tab(to_idx);
+                        }
+                        self.dragged_tab_id = None;
+                    } else {
+                        // Still dragging: show grab cursor & request continuous repaint
+                        ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+                        ctx.request_repaint();
+
+                        // Draw drop insertion indicator line
+                        if target_slot != from_idx
+                            && target_slot != from_idx + 1
+                            && !tab_rects.is_empty()
+                        {
+                            let indicator_x = if target_slot == 0 {
+                                tab_rects[0].left() - 2.0
+                            } else if target_slot >= tab_rects.len() {
+                                tab_rects.last().unwrap().right() + 2.0
+                            } else {
+                                (tab_rects[target_slot - 1].right() + tab_rects[target_slot].left())
+                                    * 0.5
+                            };
+
+                            let min_y = tab_rects[0].min.y - 1.0;
+                            let max_y = tab_rects[0].max.y + 1.0;
+
+                            let painter = ctx.layer_painter(egui::LayerId::new(
+                                egui::Order::Foreground,
+                                egui::Id::new("tab_dnd_indicator"),
+                            ));
+                            let line_rect = egui::Rect::from_min_max(
+                                egui::Pos2::new(indicator_x - 1.5, min_y),
+                                egui::Pos2::new(indicator_x + 1.5, max_y),
+                            );
+                            painter.rect_filled(line_rect, 1.5, theme::ACCENT);
+                            painter.circle_filled(
+                                egui::Pos2::new(indicator_x, min_y),
+                                3.0,
+                                theme::ACCENT,
+                            );
+                            painter.circle_filled(
+                                egui::Pos2::new(indicator_x, max_y),
+                                3.0,
+                                theme::ACCENT,
+                            );
+                        }
+
+                        // Draw floating ghost preview chip following mouse
+                        let painter = ctx.layer_painter(egui::LayerId::new(
+                            egui::Order::Tooltip,
+                            egui::Id::new("tab_dnd_ghost"),
+                        ));
+                        let ghost_tab = &self.tabs[from_idx];
+                        let ghost_title = ghost_tab.tab_title();
+                        let ghost_state = *ghost_tab.shared.state.lock();
+                        let orig_size = tab_rects
+                            .get(from_idx)
+                            .map(|r| r.size())
+                            .unwrap_or(Vec2::new(120.0, 24.0));
+
+                        let ghost_rect = egui::Rect::from_min_size(
+                            egui::Pos2::new(
+                                mouse_pos.x - orig_size.x * 0.5,
+                                mouse_pos.y - orig_size.y - 10.0,
+                            ),
+                            orig_size,
+                        );
+
+                        // Drop shadow
+                        painter.rect_filled(
+                            ghost_rect.translate(Vec2::new(2.0, 3.0)),
+                            4.0,
+                            Color32::from_black_alpha(100),
+                        );
+                        // Ghost pill body
+                        painter.rect_filled(
+                            ghost_rect,
+                            4.0,
+                            Color32::from_rgba_premultiplied(42, 45, 52, 235),
+                        );
+                        painter.rect_stroke(
+                            ghost_rect,
+                            4.0,
+                            egui::Stroke::new(1.5_f32, theme::ACCENT),
+                            egui::StrokeKind::Outside,
+                        );
+                        // State dot
+                        let dot_pos =
+                            egui::Pos2::new(ghost_rect.min.x + 10.0, ghost_rect.center().y);
+                        painter.circle_filled(dot_pos, 3.5, ghost_state.color());
+                        // Title text
+                        painter.text(
+                            egui::Pos2::new(ghost_rect.min.x + 18.0, ghost_rect.center().y),
+                            egui::Align2::LEFT_CENTER,
+                            &ghost_title,
+                            egui::FontId::proportional(12.0),
+                            theme::TEXT,
+                        );
+                    }
+                } else {
+                    self.dragged_tab_id = None;
+                }
+            } else {
+                self.dragged_tab_id = None;
+            }
+        }
+
+        // Execute context menu actions
+        if let Some((from, to)) = action_move {
+            self.move_tab(from, to);
+            self.select_tab(to);
+        }
+        if let Some(i) = action_duplicate {
+            self.duplicate_tab(i);
+        }
+        if let Some(i) = action_close_others {
+            self.close_other_tabs(i, ctx);
+        }
 
         if let Some(i) = double_click_tab {
             self.select_tab(i);
@@ -2058,7 +2492,10 @@ impl DesktopApp {
                             !busy,
                             egui::TextEdit::singleline(&mut tab.prefs.domain)
                                 .desired_width(f32::INFINITY)
-                                .hint_text(RichText::new("optional").color(Color32::from_rgb(0x60, 0x65, 0x70))),
+                                .hint_text(
+                                    RichText::new("optional")
+                                        .color(Color32::from_rgb(0x60, 0x65, 0x70)),
+                                ),
                         );
                         ui.end_row();
                     }
@@ -2819,6 +3256,8 @@ impl DesktopApp {
         let mut open = false;
         let mut new_tab = false;
         let mut close_tab = false;
+        let mut move_tab_left = false;
+        let mut move_tab_right = false;
         let mut zoom_in = false;
         let mut zoom_out = false;
 
@@ -2845,6 +3284,14 @@ impl DesktopApp {
             }
             if i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(Key::W) {
                 close_tab = true;
+            }
+            if i.modifiers.ctrl && i.modifiers.shift && !i.modifiers.alt {
+                if i.key_pressed(Key::PageUp) || i.key_pressed(Key::ArrowLeft) {
+                    move_tab_left = true;
+                }
+                if i.key_pressed(Key::PageDown) || i.key_pressed(Key::ArrowRight) {
+                    move_tab_right = true;
+                }
             }
             if i.modifiers.ctrl
                 && !i.modifiers.alt
@@ -2875,6 +3322,16 @@ impl DesktopApp {
         if close_tab {
             let idx = self.active_tab;
             self.request_close_tab(idx, ctx);
+        }
+        if move_tab_left && self.active_tab > 0 {
+            let new_idx = self.active_tab - 1;
+            self.move_tab(self.active_tab, new_idx);
+            self.select_tab(new_idx);
+        }
+        if move_tab_right && self.active_tab + 1 < self.tabs.len() {
+            let new_idx = self.active_tab + 1;
+            self.move_tab(self.active_tab, new_idx);
+            self.select_tab(new_idx);
         }
         if save {
             self.save_connection_as();
@@ -2979,6 +3436,7 @@ impl DesktopApp {
             let popup_h = (screen_rect.height() * 0.90).max(200.0);
             let mut close_tab_index: Option<usize> = None;
             let mut toggle_conn_tab_index: Option<usize> = None;
+            let mut move_tab_action: Option<(usize, usize)> = None;
 
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 close_popup = true;
@@ -3024,6 +3482,18 @@ impl DesktopApp {
                                             {
                                                 close_popup = true;
                                             }
+
+                                            if self.tabs.len() > 1 {
+                                                if ui
+                                                    .button("Sort A-Z")
+                                                    .on_hover_text(
+                                                        "Sort all connection tabs alphabetically",
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.sort_tabs_by_name();
+                                                }
+                                            }
                                         },
                                     );
                                 });
@@ -3058,19 +3528,32 @@ impl DesktopApp {
                                                 let card_h = 88.0;
                                                 let mut card_close_clicked = false;
                                                 let mut card_switch_clicked = false;
+                                                let mut card_move_left = false;
+                                                let mut card_move_right = false;
 
-                                                let (card_rect, card_response) = ui.allocate_exact_size(
-                                                    Vec2::new(card_w, card_h),
-                                                    egui::Sense::click(),
-                                                );
+                                                let (card_rect, card_response) = ui
+                                                    .allocate_exact_size(
+                                                        Vec2::new(card_w, card_h),
+                                                        egui::Sense::click(),
+                                                    );
 
                                                 ui.painter().rect_filled(card_rect, 6.0, fill);
-                                                ui.painter().rect_stroke(card_rect, 6.0, stroke, egui::StrokeKind::Outside);
+                                                ui.painter().rect_stroke(
+                                                    card_rect,
+                                                    6.0,
+                                                    stroke,
+                                                    egui::StrokeKind::Outside,
+                                                );
 
                                                 let mut child_ui = ui.new_child(
                                                     egui::UiBuilder::new()
-                                                        .max_rect(card_rect.shrink2(Vec2::new(12.0, 10.0)))
-                                                        .layout(egui::Layout::top_down(egui::Align::LEFT)),
+                                                        .max_rect(
+                                                            card_rect
+                                                                .shrink2(Vec2::new(12.0, 10.0)),
+                                                        )
+                                                        .layout(egui::Layout::top_down(
+                                                            egui::Align::LEFT,
+                                                        )),
                                                 );
 
                                                 child_ui.horizontal(|ui| {
@@ -3090,7 +3573,9 @@ impl DesktopApp {
                                                     );
 
                                                     ui.with_layout(
-                                                        egui::Layout::right_to_left(egui::Align::Center),
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
                                                         |ui| {
                                                             let (close_rect, close_resp) = ui
                                                                 .allocate_exact_size(
@@ -3098,7 +3583,9 @@ impl DesktopApp {
                                                                     egui::Sense::click(),
                                                                 );
                                                             let close_resp = close_resp
-                                                                .on_hover_text("Close tab and disconnect");
+                                                                .on_hover_text(
+                                                                    "Close tab and disconnect",
+                                                                );
                                                             let is_close_hovered =
                                                                 close_resp.hovered();
 
@@ -3135,14 +3622,14 @@ impl DesktopApp {
                                                                     Vec2::splat(18.0),
                                                                     egui::Sense::click(),
                                                                 );
-                                                            let switch_resp = switch_resp.on_hover_text(
-                                                                if is_connected {
+                                                            let switch_resp = switch_resp
+                                                                .on_hover_text(if is_connected {
                                                                     "Disconnect"
                                                                 } else {
                                                                     "Connect"
-                                                                },
-                                                            );
-                                                            let is_switch_hovered = switch_resp.hovered();
+                                                                });
+                                                            let is_switch_hovered =
+                                                                switch_resp.hovered();
 
                                                             if is_switch_hovered {
                                                                 let bg_color = if is_connected {
@@ -3166,40 +3653,119 @@ impl DesktopApp {
                                                             let c = switch_rect.center();
                                                             if is_connected {
                                                                 // Stop square icon
-                                                                let stop_rect = egui::Rect::from_center_size(
-                                                                    c,
-                                                                    Vec2::splat(6.0),
+                                                                let stop_rect =
+                                                                    egui::Rect::from_center_size(
+                                                                        c,
+                                                                        Vec2::splat(6.0),
+                                                                    );
+                                                                ui.painter().rect_filled(
+                                                                    stop_rect, 1.0, icon_color,
                                                                 );
-                                                                ui.painter().rect_filled(stop_rect, 1.0, icon_color);
                                                             } else {
                                                                 // Play triangle icon (pointing right)
                                                                 let p1 = c + Vec2::new(-2.5, -3.5);
                                                                 let p2 = c + Vec2::new(3.5, 0.0);
                                                                 let p3 = c + Vec2::new(-2.5, 3.5);
-                                                                ui.painter().add(egui::Shape::convex_polygon(
-                                                                    vec![p1, p2, p3],
-                                                                    icon_color,
-                                                                    egui::Stroke::NONE,
-                                                                ));
+                                                                ui.painter().add(
+                                                                    egui::Shape::convex_polygon(
+                                                                        vec![p1, p2, p3],
+                                                                        icon_color,
+                                                                        egui::Stroke::NONE,
+                                                                    ),
+                                                                );
                                                             }
 
                                                             if switch_resp.clicked() {
                                                                 card_switch_clicked = true;
                                                             }
 
+                                                            if self.tabs.len() > 1 {
+                                                                let (right_rect, right_resp) = ui
+                                                                    .allocate_exact_size(
+                                                                        Vec2::splat(18.0),
+                                                                        egui::Sense::click(),
+                                                                    );
+                                                                let right_resp = right_resp
+                                                                    .on_hover_text(
+                                                                        "Move tab right",
+                                                                    );
+                                                                if i + 1 < self.tabs.len() {
+                                                                    if right_resp.hovered() {
+                                                                        ui.painter().circle_filled(
+                                                                            right_rect.center(),
+                                                                            8.0,
+                                                                            theme::PANEL_ALT,
+                                                                        );
+                                                                    }
+                                                                    ui.painter().text(
+                                                                        right_rect.center(),
+                                                                        egui::Align2::CENTER_CENTER,
+                                                                        "▶",
+                                                                        egui::FontId::proportional(
+                                                                            11.0,
+                                                                        ),
+                                                                        if right_resp.hovered() {
+                                                                            theme::TEXT
+                                                                        } else {
+                                                                            theme::TEXT_DIM
+                                                                        },
+                                                                    );
+                                                                    if right_resp.clicked() {
+                                                                        card_move_right = true;
+                                                                    }
+                                                                }
+
+                                                                let (left_rect, left_resp) = ui
+                                                                    .allocate_exact_size(
+                                                                        Vec2::splat(18.0),
+                                                                        egui::Sense::click(),
+                                                                    );
+                                                                let left_resp = left_resp
+                                                                    .on_hover_text("Move tab left");
+                                                                if i > 0 {
+                                                                    if left_resp.hovered() {
+                                                                        ui.painter().circle_filled(
+                                                                            left_rect.center(),
+                                                                            8.0,
+                                                                            theme::PANEL_ALT,
+                                                                        );
+                                                                    }
+                                                                    ui.painter().text(
+                                                                        left_rect.center(),
+                                                                        egui::Align2::CENTER_CENTER,
+                                                                        "◀",
+                                                                        egui::FontId::proportional(
+                                                                            11.0,
+                                                                        ),
+                                                                        if left_resp.hovered() {
+                                                                            theme::TEXT
+                                                                        } else {
+                                                                            theme::TEXT_DIM
+                                                                        },
+                                                                    );
+                                                                    if left_resp.clicked() {
+                                                                        card_move_left = true;
+                                                                    }
+                                                                }
+                                                            }
+
                                                             ui.add_space(4.0);
                                                             ui.label(
-                                                                RichText::new(format!("• {}", tab.prefs.mode))
-                                                                    .small()
-                                                                    .monospace()
-                                                                    .color(theme::TEXT_DIM),
+                                                                RichText::new(format!(
+                                                                    "• {}",
+                                                                    tab.prefs.mode
+                                                                ))
+                                                                .small()
+                                                                .monospace()
+                                                                .color(theme::TEXT_DIM),
                                                             );
                                                         },
                                                     );
                                                 });
 
                                                 child_ui.add_space(4.0);
-                                                let label = RichText::new(&title).strong().size(13.0);
+                                                let label =
+                                                    RichText::new(&title).strong().size(13.0);
                                                 child_ui.add(
                                                     egui::Label::new(if selected {
                                                         label.color(theme::TEXT)
@@ -3211,13 +3777,21 @@ impl DesktopApp {
 
                                                 if !tab.prefs.username.is_empty() {
                                                     child_ui.label(
-                                                        RichText::new(format!("User: {}", tab.prefs.username))
-                                                            .small()
-                                                            .color(theme::TEXT_DIM),
+                                                        RichText::new(format!(
+                                                            "User: {}",
+                                                            tab.prefs.username
+                                                        ))
+                                                        .small()
+                                                        .color(theme::TEXT_DIM),
                                                     );
                                                 }
 
-                                                if card_switch_clicked {
+                                                if card_move_left && i > 0 {
+                                                    move_tab_action = Some((i, i - 1));
+                                                } else if card_move_right && i + 1 < self.tabs.len()
+                                                {
+                                                    move_tab_action = Some((i, i + 1));
+                                                } else if card_switch_clicked {
                                                     toggle_conn_tab_index = Some(i);
                                                 } else if card_close_clicked {
                                                     close_tab_index = Some(i);
@@ -3250,6 +3824,11 @@ impl DesktopApp {
 
             if let Some(i) = close_tab_index {
                 self.request_close_tab(i, ctx);
+            }
+
+            if let Some((from, to)) = move_tab_action {
+                self.move_tab(from, to);
+                self.select_tab(to);
             }
         }
 
@@ -3859,7 +4438,8 @@ mode=VNC
         let default_session = AppSession::default();
         assert_eq!(default_session.disable_rust_log, true);
 
-        let input_false = "disable_rust_log=false\n[tab]\nhost=192.168.1.100\ndisable_rust_log=false\n";
+        let input_false =
+            "disable_rust_log=false\n[tab]\nhost=192.168.1.100\ndisable_rust_log=false\n";
         let session_false = AppSession::parse(input_false);
         assert_eq!(session_false.disable_rust_log, false);
         assert_eq!(session_false.tabs[0].disable_rust_log, false);
@@ -3872,7 +4452,9 @@ mode=VNC
         assert!(is_rust_log_message("  [RUST LOG] Reader loop started"));
         assert!(!is_rust_log_message("Connected successfully"));
         assert!(!is_rust_log_message("Connecting to 192.168.1.1:3389"));
-        assert!(!is_rust_log_message("Failed to connect TCP: Connection refused"));
+        assert!(!is_rust_log_message(
+            "Failed to connect TCP: Connection refused"
+        ));
     }
 
     #[test]
@@ -3914,5 +4496,32 @@ disable_rust_log=true
         assert_eq!(session.tabs[1].disable_rust_log, true);
         // Active tab is tab 1, so session.disable_rust_log should match tab 1
         assert_eq!(session.disable_rust_log, true);
+    }
+
+    #[test]
+    fn calculate_drop_slot_edge_cases() {
+        let rects = vec![
+            egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 30.0)),
+            egui::Rect::from_min_size(egui::pos2(110.0, 0.0), egui::vec2(100.0, 30.0)),
+            egui::Rect::from_min_size(egui::pos2(220.0, 0.0), egui::vec2(100.0, 30.0)),
+        ];
+
+        // Before first tab center:
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 10.0), 0);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 49.9), 0);
+
+        // Between first and second tab center:
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 50.0), 1);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 105.0), 1);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 159.9), 1);
+
+        // Between second and third tab center:
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 160.0), 2);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 215.0), 2);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 269.9), 2);
+
+        // After third tab center:
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 270.0), 3);
+        assert_eq!(DesktopApp::calculate_drop_slot(&rects, 350.0), 3);
     }
 }
