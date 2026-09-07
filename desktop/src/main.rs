@@ -107,22 +107,21 @@ impl FrameBuffer {
         let w = self.width as usize;
         let h = self.height as usize;
         let total_pixels = w * h;
-        let mut rgba = vec![0u8; total_pixels * 4];
+        let mut pixels = Vec::with_capacity(total_pixels);
 
-        for (px, out) in self
-            .pixels
-            .iter()
-            .take(total_pixels)
-            .zip(rgba.chunks_exact_mut(4))
-        {
-            let v = *px as u32;
+        for &px in self.pixels.iter().take(total_pixels) {
+            let v = px as u32;
             let a = ((v >> 24) & 0xFF) as u8;
-            out[0] = ((v >> 16) & 0xFF) as u8; // R
-            out[1] = ((v >> 8) & 0xFF) as u8; // G
-            out[2] = (v & 0xFF) as u8; // B
-            out[3] = if a == 0 { 255 } else { a };
+            let a = if a == 0 { 255 } else { a };
+            let r = ((v >> 16) & 0xFF) as u8;
+            let g = ((v >> 8) & 0xFF) as u8;
+            let b = (v & 0xFF) as u8;
+            pixels.push(Color32::from_rgba_premultiplied(r, g, b, a));
         }
-        ColorImage::from_rgba_unmultiplied([w, h], &rgba)
+        ColorImage {
+            size: [w, h],
+            pixels,
+        }
     }
 }
 
@@ -142,6 +141,7 @@ struct SharedUi {
     dirty: AtomicBool,
     current_cursor: Mutex<egui::CursorIcon>,
     custom_cursor: Mutex<Option<CustomCursorData>>,
+    ctx: Mutex<Option<egui::Context>>,
 }
 
 impl SharedUi {
@@ -153,7 +153,14 @@ impl SharedUi {
             dirty: AtomicBool::new(false),
             current_cursor: Mutex::new(egui::CursorIcon::Default),
             custom_cursor: Mutex::new(None),
+            ctx: Mutex::new(None),
         })
+    }
+
+    fn request_repaint(&self) {
+        if let Some(ctx) = self.ctx.lock().as_ref() {
+            ctx.request_repaint();
+        }
     }
 }
 
@@ -178,17 +185,20 @@ impl SessionCallback for UiCallback {
         if !is_rust_log {
             log::info!("state={state} msg={message}");
         }
+        self.ui.request_repaint();
     }
 
     fn on_frame_decoded(&self, pixels: &[i32], _x: i32, _y: i32, width: i32, height: i32) {
         self.ui.frame.lock().set_frame(pixels, width, height);
         self.ui.dirty.store(true, Ordering::Relaxed);
+        self.ui.request_repaint();
     }
 
     fn on_resolution_changed(&self, width: i32, height: i32) {
         self.ui.frame.lock().resize(width, height);
         self.ui.dirty.store(true, Ordering::Relaxed);
         log::info!("resolution -> {width}x{height}");
+        self.ui.request_repaint();
     }
 
     fn on_cursor_changed(&self, cursor_type: i32) {
@@ -212,6 +222,7 @@ impl SessionCallback for UiCallback {
             _ => egui::CursorIcon::Default,
         };
         *self.ui.current_cursor.lock() = icon;
+        self.ui.request_repaint();
     }
 
     fn on_cursor_bitmap(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, pixels: &[i32]) {
@@ -222,6 +233,7 @@ impl SessionCallback for UiCallback {
             hot_y,
             pixels: pixels.to_vec(),
         });
+        self.ui.request_repaint();
     }
 }
 
@@ -853,6 +865,10 @@ impl DesktopApp {
         if tabs.is_empty() {
             tabs.push(ConnectionTab::new(next_id, Prefs::default()));
             next_id += 1;
+        }
+
+        for tab in &mut tabs {
+            *tab.shared.ctx.lock() = Some(cc.egui_ctx.clone());
         }
 
         let active_tab = session.active_tab.min(tabs.len().saturating_sub(1));
@@ -3557,8 +3573,8 @@ impl DesktopApp {
                                                 );
 
                                                 child_ui.horizontal(|ui| {
-                                                    let (dot, _) = ui.allocate_exact_size(
-                                                        Vec2::splat(9.0),
+                                                    let (dot, dot_resp) = ui.allocate_exact_size(
+                                                        Vec2::splat(10.0),
                                                         egui::Sense::hover(),
                                                     );
                                                     ui.painter().circle_filled(
@@ -3566,10 +3582,13 @@ impl DesktopApp {
                                                         4.0,
                                                         state.color(),
                                                     );
+                                                    dot_resp.on_hover_text(state.label());
+
                                                     ui.label(
-                                                        RichText::new(state.label())
+                                                        RichText::new(tab.prefs.mode.to_string())
                                                             .small()
-                                                            .color(state.color()),
+                                                            .monospace()
+                                                            .color(theme::TEXT_DIM),
                                                     );
 
                                                     ui.with_layout(
@@ -3748,17 +3767,6 @@ impl DesktopApp {
                                                                     }
                                                                 }
                                                             }
-
-                                                            ui.add_space(4.0);
-                                                            ui.label(
-                                                                RichText::new(format!(
-                                                                    "• {}",
-                                                                    tab.prefs.mode
-                                                                ))
-                                                                .small()
-                                                                .monospace()
-                                                                .color(theme::TEXT_DIM),
-                                                            );
                                                         },
                                                     );
                                                 });
@@ -3973,15 +3981,27 @@ impl eframe::App for DesktopApp {
             ensure_text_events_for_keyboard_input(&mut i.events);
         });
 
-        // Repaint while any tab has an active session (background tabs still receive frames).
-        let any_live = self.tabs.iter().any(|t| {
-            matches!(
-                *t.shared.state.lock(),
-                ConnectionState::Connected | ConnectionState::Connecting
-            )
+        for tab in &self.tabs {
+            let mut c = tab.shared.ctx.lock();
+            if c.is_none() {
+                *c = Some(ctx.clone());
+            }
+        }
+
+        // Frame updates from worker threads immediately call ctx.request_repaint().
+        // Here we only need a gentle heartbeat if active, or reactive mode if idle.
+        let any_connecting = self.tabs.iter().any(|t| {
+            matches!(*t.shared.state.lock(), ConnectionState::Connecting)
         });
-        if any_live {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+        let any_connected = self.tabs.iter().any(|t| {
+            matches!(*t.shared.state.lock(), ConnectionState::Connected)
+        });
+
+        if any_connecting {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        } else if any_connected {
+            // 200ms heartbeat keeps remote desktop connection monitored while dropping idle CPU to ~0%
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
 
         let state = *self.tab().shared.state.lock();

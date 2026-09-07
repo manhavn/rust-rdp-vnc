@@ -662,20 +662,23 @@ impl GraphicsPipelineHandler for MyGfxHandler {
     }
 
     fn on_capabilities_confirmed(&mut self, caps: &CapabilitySet) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!("[Rust Log] Capabilities confirmed: {:?}", caps),
+            "[Rust Log] Capabilities confirmed: {:?}",
+            caps
         );
     }
 
     fn on_reset_graphics(&mut self, width: u32, height: u32) {
         let w = width as i32;
         let h = height as i32;
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!("[Rust Log] on_reset_graphics received: {}x{}", w, h),
+            "[Rust Log] on_reset_graphics received: {}x{}",
+            w,
+            h
         );
 
         self.width = w;
@@ -688,14 +691,12 @@ impl GraphicsPipelineHandler for MyGfxHandler {
     }
 
     fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_bitmap_updated: rect=({:?}), data={}",
-                update.destination_rectangle,
-                update.data.len()
-            ),
+            "[Rust Log] on_bitmap_updated: rect=({:?}), data={}",
+            update.destination_rectangle,
+            update.data.len()
         );
         let mut pixels = self.screen_pixels.lock().unwrap();
         copy_gfx_bitmap_to_screen(
@@ -708,24 +709,23 @@ impl GraphicsPipelineHandler for MyGfxHandler {
     }
 
     fn on_frame_complete(&mut self, frame_id: u32) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!("[Rust Log] on_frame_complete: frame_id={}", frame_id),
+            "[Rust Log] on_frame_complete: frame_id={}",
+            frame_id
         );
         let pixels = self.screen_pixels.lock().unwrap();
         push_frame(self.callback.as_ref(), &pixels, self.width, self.height);
     }
 
     fn on_wire_to_surface2(&mut self, pdu: &WireToSurface2Pdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_wire_to_surface2: codec_id={:?}, data_len={}",
-                pdu.codec_id,
-                pdu.bitmap_data.len()
-            ),
+            "[Rust Log] on_wire_to_surface2: codec_id={:?}, data_len={}",
+            pdu.codec_id,
+            pdu.bitmap_data.len()
         );
         if pdu.codec_id == Codec2Type::RemoteFxProgressive {
             let mut pixels = self.screen_pixels.lock().unwrap();
@@ -735,129 +735,118 @@ impl GraphicsPipelineHandler for MyGfxHandler {
                 self.width,
                 self.height,
             ) {
-                notify_state_change(
+                crate::log_state_change!(
                     self.callback.as_ref(),
                     2,
-                    &format!("[Rust Log] progressive decode error: {:?}", e),
+                    "[Rust Log] progressive decode error: {:?}",
+                    e
                 );
             }
         }
     }
 
     fn on_solid_fill(&mut self, pdu: &SolidFillPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_solid_fill: surface_id={}, color={:?}, rects={}",
-                pdu.surface_id,
-                pdu.fill_pixel,
-                pdu.rectangles.len()
-            ),
+            "[Rust Log] on_solid_fill: surface_id={}, color={:?}, rects={}",
+            pdu.surface_id,
+            pdu.fill_pixel,
+            pdu.rectangles.len()
         );
     }
 
     fn on_surface_to_surface(&mut self, pdu: &SurfaceToSurfacePdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_surface_to_surface: src={}, dest={}",
-                pdu.source_surface_id, pdu.destination_surface_id
-            ),
+            "[Rust Log] on_surface_to_surface: src={}, dest={}",
+            pdu.source_surface_id,
+            pdu.destination_surface_id
         );
     }
 
     fn on_surface_to_cache(&mut self, pdu: &SurfaceToCachePdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_surface_to_cache: surface_id={}, slot={}",
-                pdu.surface_id, pdu.cache_slot
-            ),
+            "[Rust Log] on_surface_to_cache: surface_id={}, slot={}",
+            pdu.surface_id,
+            pdu.cache_slot
         );
     }
 
     fn on_cache_to_surface(&mut self, pdu: &CacheToSurfacePdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_cache_to_surface: surface_id={}, slot={}",
-                pdu.surface_id, pdu.cache_slot
-            ),
+            "[Rust Log] on_cache_to_surface: surface_id={}, slot={}",
+            pdu.surface_id,
+            pdu.cache_slot
         );
     }
 
     fn on_evict_cache_entry(&mut self, pdu: &EvictCacheEntryPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!("[Rust Log] on_evict_cache_entry: slot={}", pdu.cache_slot),
+            "[Rust Log] on_evict_cache_entry: slot={}",
+            pdu.cache_slot
         );
     }
 
     fn on_map_surface_to_window(&mut self, pdu: &MapSurfaceToWindowPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_map_surface_to_window: surface_id={}, window_id={}",
-                pdu.surface_id, pdu.window_id
-            ),
+            "[Rust Log] on_map_surface_to_window: surface_id={}, window_id={}",
+            pdu.surface_id,
+            pdu.window_id
         );
     }
 
     fn on_map_surface_to_scaled_output(&mut self, pdu: &MapSurfaceToScaledOutputPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_map_surface_to_scaled_output: surface_id={}",
-                pdu.surface_id
-            ),
+            "[Rust Log] on_map_surface_to_scaled_output: surface_id={}",
+            pdu.surface_id
         );
     }
 
     fn on_map_surface_to_scaled_window(&mut self, pdu: &MapSurfaceToScaledWindowPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_map_surface_to_scaled_window: surface_id={}",
-                pdu.surface_id
-            ),
+            "[Rust Log] on_map_surface_to_scaled_window: surface_id={}",
+            pdu.surface_id
         );
     }
 
     fn on_delete_encoding_context(&mut self, pdu: &DeleteEncodingContextPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_delete_encoding_context: surface_id={}",
-                pdu.surface_id
-            ),
+            "[Rust Log] on_delete_encoding_context: surface_id={}",
+            pdu.surface_id
         );
     }
 
     fn on_cache_import_reply(&mut self, pdu: &CacheImportReplyPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!(
-                "[Rust Log] on_cache_import_reply: slots={}",
-                pdu.cache_slots.len()
-            ),
+            "[Rust Log] on_cache_import_reply: slots={}",
+            pdu.cache_slots.len()
         );
     }
 
     fn on_unhandled_pdu(&mut self, pdu: &GfxPdu) {
-        notify_state_change(
+        crate::log_state_change!(
             self.callback.as_ref(),
             2,
-            &format!("[Rust Log] on_unhandled_pdu: {:?}", pdu),
+            "[Rust Log] on_unhandled_pdu: {:?}",
+            pdu
         );
     }
 }
@@ -1638,7 +1627,7 @@ pub fn connect_session(
                                             if let Ok(fp_update) = FastPathUpdate::decode_with_code(fp_update_pdu.data, fp_update_pdu.update_code) {
                                                 match fp_update {
                                                     FastPathUpdate::Bitmap(bitmap_data) => {
-                                                        notify_state_change(callback_reader.as_ref(), 2, &format!("[Rust Log] FastPath Bitmap update: {} rects", bitmap_data.rectangles.len()));
+                                                        crate::log_state_change!(callback_reader.as_ref(), 2, "[Rust Log] FastPath Bitmap update: {} rects", bitmap_data.rectangles.len());
                                                         for rect in bitmap_data.rectangles {
                                                             let w = rect.width as usize;
                                                             let h = rect.height as usize;
@@ -1683,7 +1672,7 @@ pub fn connect_session(
                                                         push_frame(callback_reader.as_ref(), &screen_pixels, width, height);
                                                     }
                                                     FastPathUpdate::SurfaceCommands(commands) => {
-                                                        notify_state_change(callback_reader.as_ref(), 2, &format!("[Rust Log] FastPath SurfaceCommands: {} cmds", commands.len()));
+                                                        crate::log_state_change!(callback_reader.as_ref(), 2, "[Rust Log] FastPath SurfaceCommands: {} cmds", commands.len());
                                                         for cmd in commands {
                                                             match cmd {
                                                                 SurfaceCommand::SetSurfaceBits(bits) | SurfaceCommand::StreamSurfaceBits(bits) => {

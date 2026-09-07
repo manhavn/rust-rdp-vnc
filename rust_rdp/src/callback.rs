@@ -36,6 +36,15 @@ pub fn notify_state_change(callback: &dyn SessionCallback, state: i32, message: 
     callback.on_state_changed(state, message);
 }
 
+#[macro_export]
+macro_rules! log_state_change {
+    ($callback:expr, $state:expr, $($arg:tt)*) => {
+        if !$crate::is_rust_log_disabled() {
+            $crate::callback::notify_state_change($callback, $state, &format!($($arg)*));
+        }
+    };
+}
+
 pub fn notify_resolution_change(callback: &dyn SessionCallback, width: i32, height: i32) {
     callback.on_resolution_changed(width, height);
 }
