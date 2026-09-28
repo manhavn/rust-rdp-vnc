@@ -1739,15 +1739,7 @@ pub fn connect_session(
                                                                     color_ptr.xor_mask,
                                                                     color_ptr.and_mask,
                                                                 );
-                                                                let geom_code = analyze_cursor_bitmap(
-                                                                    color_ptr.width,
-                                                                    color_ptr.height,
-                                                                    color_ptr.hot_spot.x,
-                                                                    color_ptr.hot_spot.y,
-                                                                    color_ptr.and_mask,
-                                                                    color_ptr.xor_mask,
-                                                                );
-                                                                notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                notify_cursor_change(callback_reader.as_ref(), entry.geom_code);
                                                                 notify_cursor_bitmap(
                                                                     callback_reader.as_ref(),
                                                                     entry.width,
@@ -1761,16 +1753,8 @@ pub fn connect_session(
                                                             }
                                                             ironrdp_pdu::pointer::PointerUpdateData::Cached(cached_ptr) => {
                                                                 let idx = (cached_ptr.cache_index as usize) % 32;
-                                                                if let Some(ref entry) = pointer_cache[idx] {
-                                                                    let geom_code = analyze_cursor_bitmap(
-                                                                        entry.width as u16,
-                                                                        entry.height as u16,
-                                                                        entry.hot_x as u16,
-                                                                        entry.hot_y as u16,
-                                                                        &[],
-                                                                        &[],
-                                                                    );
-                                                                    notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                if let Some(entry) = &pointer_cache[idx] {
+                                                                    notify_cursor_change(callback_reader.as_ref(), entry.geom_code);
                                                                     notify_cursor_bitmap(
                                                                         callback_reader.as_ref(),
                                                                         entry.width,
@@ -1794,15 +1778,7 @@ pub fn connect_session(
                                                                     cp.xor_mask,
                                                                     cp.and_mask,
                                                                 );
-                                                                let geom_code = analyze_cursor_bitmap(
-                                                                    cp.width,
-                                                                    cp.height,
-                                                                    cp.hot_spot.x,
-                                                                    cp.hot_spot.y,
-                                                                    cp.and_mask,
-                                                                    cp.xor_mask,
-                                                                );
-                                                                notify_cursor_change(callback_reader.as_ref(), geom_code);
+                                                                notify_cursor_change(callback_reader.as_ref(), entry.geom_code);
                                                                 notify_cursor_bitmap(
                                                                     callback_reader.as_ref(),
                                                                     entry.width,
@@ -2264,6 +2240,7 @@ struct CursorCacheEntry {
     height: i32,
     hot_x: i32,
     hot_y: i32,
+    geom_code: i32,
     pixels: Vec<i32>,
 }
 
@@ -2285,6 +2262,7 @@ fn decode_color_pointer_rgba(
             height: height as i32,
             hot_x: hot_x as i32,
             hot_y: hot_y as i32,
+            geom_code: 0,
             pixels,
         };
     }
@@ -2333,146 +2311,197 @@ fn decode_color_pointer_rgba(
         }
     }
 
+    let geom_code = analyze_cursor_pixels(width, height, hot_x, hot_y, &pixels);
+
     CursorCacheEntry {
         width: width as i32,
         height: height as i32,
         hot_x: hot_x as i32,
         hot_y: hot_y as i32,
+        geom_code,
         pixels,
     }
 }
 
-fn analyze_cursor_bitmap(
+fn analyze_cursor_pixels(
     width: u16,
     height: u16,
     hot_x: u16,
     hot_y: u16,
-    and_mask: &[u8],
-    xor_mask: &[u8],
+    pixels: &[i32],
 ) -> i32 {
     let w = width as usize;
     let h = height as usize;
-    if w == 0 || h == 0 {
+    if w == 0 || h == 0 || pixels.len() < w * h {
         return 0;
     }
 
-    if hot_x <= 2 && hot_y <= 2 {
-        return 0; // Default Arrow
-    }
-
-    let and_row_bytes = ((w + 15) / 16) * 2;
     let mut min_x = w;
     let mut max_x = 0;
     let mut min_y = h;
     let mut max_y = 0;
-
-    let mut q_top_left = 0;
-    let mut q_top_right = 0;
-    let mut q_bottom_left = 0;
-    let mut q_bottom_right = 0;
+    let mut total_visible = 0usize;
 
     for y in 0..h {
         for x in 0..w {
-            let is_visible = if !and_mask.is_empty() {
-                let byte_idx = y * and_row_bytes + (x / 8);
-                if byte_idx < and_mask.len() {
-                    let bit = (and_mask[byte_idx] >> (7 - (x % 8))) & 1;
-                    bit == 0
-                } else {
-                    false
-                }
-            } else {
-                let pixel_offset = (y * w + x) * 4;
-                if pixel_offset + 3 < xor_mask.len() {
-                    xor_mask[pixel_offset + 3] > 0
-                } else {
-                    false
-                }
-            };
-
-            if is_visible {
-                if x < min_x {
-                    min_x = x;
-                }
-                if x > max_x {
-                    max_x = x;
-                }
-                if y < min_y {
-                    min_y = y;
-                }
-                if y > max_y {
-                    max_y = y;
-                }
-
-                if x < w / 2 && y < h / 2 {
-                    q_top_left += 1;
-                } else if x >= w / 2 && y < h / 2 {
-                    q_top_right += 1;
-                } else if x < w / 2 && y >= h / 2 {
-                    q_bottom_left += 1;
-                } else {
-                    q_bottom_right += 1;
-                }
+            let p = pixels[y * w + x] as u32;
+            let alpha = (p >> 24) & 0xFF;
+            if alpha > 32 {
+                total_visible += 1;
+                if x < min_x { min_x = x; }
+                if x > max_x { max_x = x; }
+                if y < min_y { min_y = y; }
+                if y > max_y { max_y = y; }
             }
         }
     }
 
-    if min_x > max_x || min_y > max_y {
+    if total_visible == 0 || min_x > max_x || min_y > max_y {
         return 0;
     }
 
     let span_x = max_x - min_x + 1;
     let span_y = max_y - min_y + 1;
-    let total_pixels = q_top_left + q_top_right + q_bottom_left + q_bottom_right;
+    let center_x = (min_x + max_x) / 2;
+    let center_y = (min_y + max_y) / 2;
+    let hx = hot_x as usize;
+    let hy = hot_y as usize;
 
-    if span_y >= 12 && span_x <= 10 && span_y > span_x * 3 / 2 {
-        return 2; // Text I-Beam
+    let mut top_row_w = 0usize;
+    let mut bot_row_w = 0usize;
+    for x in min_x..=max_x {
+        let p_top = pixels[min_y * w + x] as u32;
+        if ((p_top >> 24) & 0xFF) > 32 {
+            top_row_w += 1;
+        }
+        let p_bot = pixels[max_y * w + x] as u32;
+        if ((p_bot >> 24) & 0xFF) > 32 {
+            bot_row_w += 1;
+        }
     }
 
-    if span_x >= 12 && span_y <= 12 && span_x > span_y * 3 / 2 {
-        return 6; // Resize EW (Horizontal)
+    // 1. Vertical Resize (^) vs Text I-Beam
+    if span_y >= 8 && span_x <= 15 && span_y >= (span_x * 12) / 10 {
+        // NS resize has pointed arrow tip (1 or 2 pixels) at top AND bottom
+        if top_row_w <= 2 && bot_row_w <= 2 && span_x >= 5 {
+            return 7; // ResizeNorth (NS)
+        }
+        // Text I-Beam: tall, narrow, top and bottom serifs or single line
+        if (hx as isize - center_x as isize).abs() <= 3 || span_x <= 4 {
+            return 2; // Text
+        }
     }
 
-    if span_y >= 14 && span_x <= 14 && span_y > span_x * 5 / 4 {
-        return 7; // Resize NS (Vertical)
+    // 2. Horizontal Resize (<->)
+    if span_x >= 10 && span_y <= 15 && span_x >= (span_y * 13) / 10 {
+        return 6; // ResizeEast (EW)
     }
 
-    let nwse_score = q_top_left + q_bottom_right;
-    let nesw_score = q_top_right + q_bottom_left;
+    // Quadrant counts relative to bounding box center
+    let mut q_tl = 0usize;
+    let mut q_tr = 0usize;
+    let mut q_bl = 0usize;
+    let mut q_br = 0usize;
 
-    if nwse_score > nesw_score * 2 && total_pixels >= 10 {
-        return 4; // Resize NWSE
+    for y in min_y..=max_y {
+        for x in min_x..=max_x {
+            let p = pixels[y * w + x] as u32;
+            if ((p >> 24) & 0xFF) > 32 {
+                if x < center_x && y < center_y {
+                    q_tl += 1;
+                } else if x >= center_x && y < center_y {
+                    q_tr += 1;
+                } else if x < center_x && y >= center_y {
+                    q_bl += 1;
+                } else {
+                    q_br += 1;
+                }
+            }
+        }
     }
 
-    if nesw_score > nwse_score * 2 && total_pixels >= 10 {
-        return 5; // Resize NESW
+    // 3. Diagonal Resize NW-SE (\)
+    if (q_tl + q_br) > (q_tr + q_bl) * 2 && total_visible >= 8 && span_x >= 8 && span_y >= 8 {
+        return 4; // ResizeNwSe
     }
 
-    if span_x >= 14
-        && span_y >= 14
-        && q_top_left > 2
-        && q_top_right > 2
-        && q_bottom_left > 2
-        && q_bottom_right > 2
-    {
-        return 10; // Move
+    // 4. Diagonal Resize NE-SW (/)
+    if (q_tr + q_bl) > (q_tl + q_br) * 2 && total_visible >= 8 && span_x >= 8 && span_y >= 8 {
+        return 5; // ResizeNeSw
     }
 
-    if hot_y <= 4 && hot_x >= 2 {
-        return 3; // Pointing Hand
+    // 5. Move (+)
+    if span_x >= 12 && span_y >= 12 && q_tl >= 2 && q_tr >= 2 && q_bl >= 2 && q_br >= 2 {
+        if (hx as isize - center_x as isize).abs() <= 4 && (hy as isize - center_y as isize).abs() <= 4 {
+            return 10; // Move
+        }
     }
 
-    if hot_x <= 2 && hot_y <= 2 {
-        0
-    } else {
-        3
+    // 6. Default Arrow (standard arrow cursor has hotspot at top-left corner)
+    if hx <= 2 && hy <= 2 {
+        return 0; // Default Arrow
     }
+
+    // 7. Hand (finger tip hotspot, palm below)
+    if hy <= 8 && span_x >= 8 && span_y >= 10 {
+        return 3; // PointingHand
+    }
+
+    0
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{rdp_wheel_rotation_chunks, vnc_wheel_steps};
+    use super::{analyze_cursor_pixels, rdp_wheel_rotation_chunks, vnc_wheel_steps};
 
+    #[test]
+    fn analyze_cursor_pixels_detects_ibeam_and_arrow() {
+        let w = 32usize;
+        let h = 32usize;
+
+        // Test I-Beam
+        let mut ibeam = vec![0i32; w * h];
+        for y in 8..=24 {
+            ibeam[y * w + 16] = -1; // 0xFFFFFFFF (opaque)
+            if y == 8 || y == 24 {
+                for x in 12..=20 {
+                    ibeam[y * w + x] = -1;
+                }
+            }
+        }
+        assert_eq!(analyze_cursor_pixels(32, 32, 16, 16, &ibeam), 2); // Text
+
+        // Test Arrow
+        let mut arrow = vec![0i32; w * h];
+        for y in 0..15 {
+            for x in 0..=y {
+                arrow[y * w + x] = -1;
+            }
+        }
+        assert_eq!(analyze_cursor_pixels(32, 32, 0, 0, &arrow), 0); // Default Arrow
+
+        // Test Horizontal Resize (<->)
+        let mut ew = vec![0i32; w * h];
+        for x in 6..=25 {
+            ew[16 * w + x] = -1;
+        }
+        for y in 12..=20 {
+            ew[y * w + 6 + (y as isize - 16).unsigned_abs()] = -1;
+            ew[y * w + 25 - (y as isize - 16).unsigned_abs()] = -1;
+        }
+        assert_eq!(analyze_cursor_pixels(32, 32, 16, 16, &ew), 6); // ResizeEast
+
+        // Test Vertical Resize (^)
+        let mut ns = vec![0i32; w * h];
+        for y in 6..=25 {
+            ns[y * w + 16] = -1;
+        }
+        for x in 12..=20 {
+            ns[(6 + (x as isize - 16).unsigned_abs()) * w + x] = -1;
+            ns[(25 - (x as isize - 16).unsigned_abs()) * w + x] = -1;
+        }
+        assert_eq!(analyze_cursor_pixels(32, 32, 16, 16, &ns), 7); // ResizeNorth
+    }
     #[test]
     fn rdp_wheel_chunks_preserve_signed_units() {
         assert_eq!(rdp_wheel_rotation_chunks(120), vec![120]);
