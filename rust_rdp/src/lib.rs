@@ -2267,10 +2267,10 @@ fn decode_color_pointer_rgba(
         };
     }
 
-    let and_row_bytes = ((w + 31) / 32) * 4;
+    let and_row_bytes = w.div_ceil(32) * 4;
     let bpp_bytes = if bpp > 0 { (bpp as usize) / 8 } else { 3 };
     let bpp_bytes = bpp_bytes.max(1);
-    let xor_row_bytes = ((w * bpp_bytes + 3) / 4) * 4;
+    let xor_row_bytes = (w * bpp_bytes).div_ceil(4) * 4;
 
     for y in 0..h {
         let src_y = h - 1 - y;
@@ -2323,13 +2323,7 @@ fn decode_color_pointer_rgba(
     }
 }
 
-fn analyze_cursor_pixels(
-    width: u16,
-    height: u16,
-    hot_x: u16,
-    hot_y: u16,
-    pixels: &[i32],
-) -> i32 {
+fn analyze_cursor_pixels(width: u16, height: u16, hot_x: u16, hot_y: u16, pixels: &[i32]) -> i32 {
     let w = width as usize;
     let h = height as usize;
     if w == 0 || h == 0 || pixels.len() < w * h {
@@ -2348,10 +2342,18 @@ fn analyze_cursor_pixels(
             let alpha = (p >> 24) & 0xFF;
             if alpha > 32 {
                 total_visible += 1;
-                if x < min_x { min_x = x; }
-                if x > max_x { max_x = x; }
-                if y < min_y { min_y = y; }
-                if y > max_y { max_y = y; }
+                if x < min_x {
+                    min_x = x;
+                }
+                if x > max_x {
+                    max_x = x;
+                }
+                if y < min_y {
+                    min_y = y;
+                }
+                if y > max_y {
+                    max_y = y;
+                }
             }
         }
     }
@@ -2462,15 +2464,22 @@ fn analyze_cursor_pixels(
         let mut col_mid = 0usize;
         for x in min_x..=max_x {
             let p = pixels[center_y * w + x] as u32;
-            if ((p >> 24) & 0xFF) > 32 { row_mid += 1; }
+            if ((p >> 24) & 0xFF) > 32 {
+                row_mid += 1;
+            }
         }
         for y in min_y..=max_y {
             let p = pixels[y * w + center_x] as u32;
-            if ((p >> 24) & 0xFF) > 32 { col_mid += 1; }
+            if ((p >> 24) & 0xFF) > 32 {
+                col_mid += 1;
+            }
         }
 
         // Crosshair: thin horizontal and vertical lines crossing at center
-        if row_mid >= (span_x * 7) / 10 && col_mid >= (span_y * 7) / 10 && total_visible <= (span_x + span_y) * 2 {
+        if row_mid >= (span_x * 7) / 10
+            && col_mid >= (span_y * 7) / 10
+            && total_visible <= (span_x + span_y) * 2
+        {
             return 9; // Crosshair
         }
 
@@ -2480,9 +2489,15 @@ fn analyze_cursor_pixels(
         let mut bot_y_w = 0usize;
         if min_y + 2 < max_y && max_y >= 2 {
             for x in min_x..=max_x {
-                if ((pixels[center_y * w + x] as u32 >> 24) & 0xFF) > 32 { mid_y_w += 1; }
-                if ((pixels[(min_y + 2) * w + x] as u32 >> 24) & 0xFF) > 32 { top_y_w += 1; }
-                if ((pixels[(max_y - 2) * w + x] as u32 >> 24) & 0xFF) > 32 { bot_y_w += 1; }
+                if ((pixels[center_y * w + x] as u32 >> 24) & 0xFF) > 32 {
+                    mid_y_w += 1;
+                }
+                if ((pixels[(min_y + 2) * w + x] as u32 >> 24) & 0xFF) > 32 {
+                    top_y_w += 1;
+                }
+                if ((pixels[(max_y - 2) * w + x] as u32 >> 24) & 0xFF) > 32 {
+                    bot_y_w += 1;
+                }
             }
             if top_y_w >= 6 && bot_y_w >= 6 && mid_y_w <= 4 && span_y >= 12 {
                 return 8; // Wait
@@ -2490,10 +2505,14 @@ fn analyze_cursor_pixels(
         }
 
         // Move: 4 arrows in all 4 quadrants
-        if q_tl >= 2 && q_tr >= 2 && q_bl >= 2 && q_br >= 2 {
-            if (hx as isize - center_x as isize).abs() <= 4 && (hy as isize - center_y as isize).abs() <= 4 {
-                return 10; // Move
-            }
+        if q_tl >= 2
+            && q_tr >= 2
+            && q_bl >= 2
+            && q_br >= 2
+            && (hx as isize - center_x as isize).abs() <= 4
+            && (hy as isize - center_y as isize).abs() <= 4
+        {
+            return 10; // Move
         }
     }
 

@@ -15,7 +15,7 @@ use rust_rdp::{
     SessionCallback,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -134,6 +134,20 @@ struct CustomCursorData {
     pixels: Vec<i32>,
 }
 
+/// Pointer shape the remote server asked for.
+///
+/// Wayland backends publish this as a real compositor cursor surface, which is
+/// pixel-exact and never trips the GNOME Shell cursor assertion.
+#[derive(Clone)]
+enum RemoteCursor {
+    /// RDP `SetDefault`: let the compositor draw its own cursor.
+    Default,
+    /// RDP `SetHidden`: transparent cursor.
+    Hidden,
+    /// RDP pixel-exact bitmap.
+    Bitmap(CustomCursorData),
+}
+
 struct SharedUi {
     state: Mutex<ConnectionState>,
     status: Mutex<String>,
@@ -141,6 +155,10 @@ struct SharedUi {
     dirty: AtomicBool,
     current_cursor: Mutex<egui::CursorIcon>,
     custom_cursor: Mutex<Option<CustomCursorData>>,
+    /// Latest requested remote pointer shape.
+    remote_cursor: Mutex<RemoteCursor>,
+    /// Bumped whenever `remote_cursor` changes.
+    cursor_revision: AtomicU64,
     ctx: Mutex<Option<egui::Context>>,
 }
 
@@ -153,6 +171,8 @@ impl SharedUi {
             dirty: AtomicBool::new(false),
             current_cursor: Mutex::new(egui::CursorIcon::Default),
             custom_cursor: Mutex::new(None),
+            remote_cursor: Mutex::new(RemoteCursor::Default),
+            cursor_revision: AtomicU64::new(0),
             ctx: Mutex::new(None),
         })
     }
@@ -204,16 +224,7 @@ impl SessionCallback for UiCallback {
     fn on_cursor_changed(&self, cursor_type: i32) {
         let icon = match cursor_type {
             0 => egui::CursorIcon::Default,
-            // On Linux/Wayland, hiding the cursor via CursorIcon::None triggers
-            // wl_pointer.set_cursor(surface = NULL) in winit, which causes a fatal
-            // assertion failure in Mutter / GNOME Shell 51 (upstream issue #9444).
-            1 => {
-                if cfg!(target_os = "linux") {
-                    egui::CursorIcon::Default
-                } else {
-                    egui::CursorIcon::None
-                }
-            }
+            1 => egui::CursorIcon::None,
             2 => egui::CursorIcon::Text,
             3 => egui::CursorIcon::PointingHand,
             4 => egui::CursorIcon::ResizeNwSe,
@@ -231,17 +242,32 @@ impl SessionCallback for UiCallback {
             _ => egui::CursorIcon::Default,
         };
         *self.ui.current_cursor.lock() = icon;
+
+        // Codes above 1 only carry a shape hint; the matching bitmap always
+        // arrives right after via `on_cursor_bitmap`.
+        let native = match cursor_type {
+            0 => Some(RemoteCursor::Default),
+            1 => Some(RemoteCursor::Hidden),
+            _ => None,
+        };
+        if let Some(native) = native {
+            *self.ui.remote_cursor.lock() = native;
+            self.ui.cursor_revision.fetch_add(1, Ordering::Release);
+        }
         self.ui.request_repaint();
     }
 
     fn on_cursor_bitmap(&self, width: i32, height: i32, hot_x: i32, hot_y: i32, pixels: &[i32]) {
-        *self.ui.custom_cursor.lock() = Some(CustomCursorData {
+        let data = CustomCursorData {
             width,
             height,
             hot_x,
             hot_y,
             pixels: pixels.to_vec(),
-        });
+        };
+        *self.ui.custom_cursor.lock() = Some(data.clone());
+        *self.ui.remote_cursor.lock() = RemoteCursor::Bitmap(data);
+        self.ui.cursor_revision.fetch_add(1, Ordering::Release);
         self.ui.request_repaint();
     }
 }
@@ -794,6 +820,8 @@ struct DesktopApp {
     remote_input_owned_last_frame: bool,
     /// Native X11/Wayland shortcut inhibition while the remote view owns input.
     system_input_capture: SystemInputCapture,
+    /// `(tab_id, cursor_revision)` last pushed to the native cursor surface.
+    applied_cursor: Option<(u64, u64)>,
     /// Exact local-only hitbox of the floating Exit control.
     view_exit_overlay_rect: Option<egui::Rect>,
     /// Toggle state of quick tab list in view fullscreen mode.
@@ -900,6 +928,7 @@ impl DesktopApp {
             remote_input_active: false,
             remote_input_owned_last_frame: false,
             system_input_capture: SystemInputCapture::new(cc),
+            applied_cursor: None,
             view_exit_overlay_rect: None,
             show_fullscreen_tabs: false,
             toast: None,
@@ -947,7 +976,7 @@ impl DesktopApp {
             self.hover_send_interval_ms
         ));
         text.push_str(&format!("disable_rust_log={}\n", self.disable_rust_log));
-        text.push_str("\n");
+        text.push('\n');
 
         for (i, tab) in self.tabs.iter().enumerate() {
             text.push_str("[tab]\n");
@@ -977,7 +1006,7 @@ impl DesktopApp {
             text.push_str(&format!("enable_hover_throttle={}\n", throttle));
             text.push_str(&format!("hover_send_interval_ms={}\n", interval));
             text.push_str(&format!("disable_rust_log={}\n", no_log));
-            text.push_str("\n");
+            text.push('\n');
         }
 
         let _ = std::fs::write(path, text);
@@ -989,6 +1018,42 @@ impl DesktopApp {
 
     fn tab_mut(&mut self) -> &mut ConnectionTab {
         &mut self.tabs[self.active_tab]
+    }
+
+    /// Publish the remote pointer shape through the compositor cursor surface.
+    ///
+    /// Wayland renders the exact remote bitmap, so no shape guessing is needed
+    /// and the pointer never has to be hidden with `set_cursor(NULL)`.
+    fn sync_native_cursor(&mut self) {
+        if !self.system_input_capture.drives_native_cursor() {
+            return;
+        }
+
+        let (tab_id, revision) = {
+            let tab = self.tab();
+            (
+                tab.tab_id,
+                tab.shared.cursor_revision.load(Ordering::Acquire),
+            )
+        };
+
+        if self.applied_cursor != Some((tab_id, revision)) {
+            self.applied_cursor = Some((tab_id, revision));
+            let request = self.tab().shared.remote_cursor.lock().clone();
+            match request {
+                RemoteCursor::Default => self.system_input_capture.set_cursor_default(),
+                RemoteCursor::Hidden => self.system_input_capture.set_cursor_hidden(),
+                RemoteCursor::Bitmap(data) => self.system_input_capture.set_cursor_bitmap(
+                    data.width,
+                    data.height,
+                    data.hot_x,
+                    data.hot_y,
+                    &data.pixels,
+                ),
+            }
+        }
+
+        self.system_input_capture.sync_cursor();
     }
 
     fn select_tab(&mut self, index: usize) {
@@ -2947,14 +3012,17 @@ impl DesktopApp {
         }
 
         let custom = self.tab().shared.custom_cursor.lock().clone();
-        // On Linux/Wayland, hiding the cursor via CursorIcon::None triggers
-        // wl_pointer.set_cursor(surface = NULL) while shortcuts are inhibited,
-        // causing a fatal Clutter assertion crash in GNOME Shell 51 (upstream issue #9444).
-        // Instead, rely on the analyzed native cursor shape (`current_cursor`), which
-        // renders smoothly at native display refresh rate without crashing the compositor.
-        let use_software_cursor = !cfg!(target_os = "linux") && custom.is_some();
+        let native_cursor = self.system_input_capture.drives_native_cursor();
+        // Wayland publishes the remote pointer shape as a real compositor cursor
+        // surface (pixel-exact). Keep egui's icon pinned to the default so it
+        // never clobbers it, and never emit `CursorIcon::None`: that hides the
+        // pointer through `wl_pointer.set_cursor(NULL)`, which aborts GNOME
+        // Shell 51 (gnome-shell#9444).
+        let use_software_cursor = !native_cursor && custom.is_some();
 
-        if view_focused || view_fullscreen {
+        if native_cursor {
+            ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
+        } else if view_focused || view_fullscreen {
             if use_software_cursor && response.hovered() {
                 ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
             } else {
@@ -3517,16 +3585,15 @@ impl DesktopApp {
                                                 close_popup = true;
                                             }
 
-                                            if self.tabs.len() > 1 {
-                                                if ui
+                                            if self.tabs.len() > 1
+                                                && ui
                                                     .button("Sort A-Z")
                                                     .on_hover_text(
                                                         "Sort all connection tabs alphabetically",
                                                     )
                                                     .clicked()
-                                                {
-                                                    self.sort_tabs_by_name();
-                                                }
+                                            {
+                                                self.sort_tabs_by_name();
                                             }
                                         },
                                     );
@@ -4008,12 +4075,14 @@ impl eframe::App for DesktopApp {
 
         // Frame updates from worker threads immediately call ctx.request_repaint().
         // Here we only need a gentle heartbeat if active, or reactive mode if idle.
-        let any_connecting = self.tabs.iter().any(|t| {
-            matches!(*t.shared.state.lock(), ConnectionState::Connecting)
-        });
-        let any_connected = self.tabs.iter().any(|t| {
-            matches!(*t.shared.state.lock(), ConnectionState::Connected)
-        });
+        let any_connecting = self
+            .tabs
+            .iter()
+            .any(|t| matches!(*t.shared.state.lock(), ConnectionState::Connecting));
+        let any_connected = self
+            .tabs
+            .iter()
+            .any(|t| matches!(*t.shared.state.lock(), ConnectionState::Connected));
 
         if any_connecting {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
@@ -4026,6 +4095,9 @@ impl eframe::App for DesktopApp {
 
         // Reset each frame; remote view sets this when it owns keyboard focus.
         self.remote_input_active = false;
+
+        // Keep the compositor pointer in sync with the remote shape.
+        self.sync_native_cursor();
 
         // Dynamic window title
         let title = if state == ConnectionState::Connected {
@@ -4447,9 +4519,9 @@ mode=VNC
 "#;
         let session = AppSession::parse(input);
         assert_eq!(session.active_tab, 1);
-        assert_eq!(session.enable_hover_throttle, true);
+        assert!(session.enable_hover_throttle);
         assert_eq!(session.hover_send_interval_ms, 500);
-        assert_eq!(session.disable_rust_log, true);
+        assert!(session.disable_rust_log);
         assert_eq!(session.tabs.len(), 2);
         assert_eq!(session.tabs[0].host, "192.168.1.10");
         assert_eq!(session.tabs[0].mode, "RDP");
@@ -4465,22 +4537,22 @@ mode=VNC
         assert_eq!(session.tabs.len(), 1);
         assert_eq!(session.tabs[0].host, "192.168.1.100");
         assert_eq!(session.tabs[0].port, "3389");
-        assert_eq!(session.tabs[0].disable_rust_log, true);
+        assert!(session.tabs[0].disable_rust_log);
     }
 
     #[test]
     fn app_session_defaults_disable_rust_log_to_true() {
         let default_prefs = Prefs::default();
-        assert_eq!(default_prefs.disable_rust_log, true);
+        assert!(default_prefs.disable_rust_log);
 
         let default_session = AppSession::default();
-        assert_eq!(default_session.disable_rust_log, true);
+        assert!(default_session.disable_rust_log);
 
         let input_false =
             "disable_rust_log=false\n[tab]\nhost=192.168.1.100\ndisable_rust_log=false\n";
         let session_false = AppSession::parse(input_false);
-        assert_eq!(session_false.disable_rust_log, false);
-        assert_eq!(session_false.tabs[0].disable_rust_log, false);
+        assert!(!session_false.disable_rust_log);
+        assert!(!session_false.tabs[0].disable_rust_log);
     }
 
     #[test]
@@ -4530,10 +4602,10 @@ disable_rust_log=true
 "#;
         let session = AppSession::parse(input);
         assert_eq!(session.active_tab, 1);
-        assert_eq!(session.tabs[0].disable_rust_log, false);
-        assert_eq!(session.tabs[1].disable_rust_log, true);
+        assert!(!session.tabs[0].disable_rust_log);
+        assert!(session.tabs[1].disable_rust_log);
         // Active tab is tab 1, so session.disable_rust_log should match tab 1
-        assert_eq!(session.disable_rust_log, true);
+        assert!(session.disable_rust_log);
     }
 
     #[test]

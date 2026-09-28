@@ -104,6 +104,44 @@ mod linux {
                 Backend::Unsupported => Vec::new(),
             }
         }
+
+        /// True when this backend publishes the remote pointer shape itself
+        /// (Wayland). Other backends let egui pick the cursor icon instead.
+        pub fn drives_native_cursor(&self) -> bool {
+            matches!(self.backend, Backend::Wayland(_))
+        }
+
+        pub fn set_cursor_bitmap(
+            &mut self,
+            width: i32,
+            height: i32,
+            hot_x: i32,
+            hot_y: i32,
+            pixels: &[i32],
+        ) {
+            if let Backend::Wayland(capture) = &mut self.backend {
+                capture.set_cursor_bitmap(width, height, hot_x, hot_y, pixels);
+            }
+        }
+
+        pub fn set_cursor_hidden(&mut self) {
+            if let Backend::Wayland(capture) = &mut self.backend {
+                capture.set_cursor_hidden();
+            }
+        }
+
+        pub fn set_cursor_default(&mut self) {
+            if let Backend::Wayland(capture) = &mut self.backend {
+                capture.set_cursor_default();
+            }
+        }
+
+        /// Flush a pending native cursor request. Call once per repaint.
+        pub fn sync_cursor(&mut self) {
+            if let Backend::Wayland(capture) = &mut self.backend {
+                capture.sync_cursor();
+            }
+        }
     }
 
     struct X11Capture {
@@ -174,7 +212,8 @@ mod linux {
                     | x11_dl::xlib::PointerMotionMask
                     | x11_dl::xlib::ButtonMotionMask
                     | x11_dl::xlib::EnterWindowMask
-                    | x11_dl::xlib::LeaveWindowMask) as std::os::raw::c_uint;
+                    | x11_dl::xlib::LeaveWindowMask)
+                    as std::os::raw::c_uint;
                 unsafe {
                     (self.xlib.XGrabPointer)(
                         self.display,
@@ -343,17 +382,222 @@ mod linux {
 
     mod wayland {
         use std::ffi::c_void;
+        use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd};
 
         use wayland_backend::client::{Backend, ObjectId};
         use wayland_client::{
             globals::{registry_queue_init, GlobalListContents},
-            protocol::{wl_keyboard, wl_registry, wl_seat, wl_surface},
+            protocol::{
+                wl_buffer, wl_compositor, wl_keyboard, wl_pointer, wl_registry, wl_seat, wl_shm,
+                wl_shm_pool, wl_surface,
+            },
             Connection, Dispatch, EventQueue, Proxy, QueueHandle, WEnum,
+        };
+        use wayland_protocols::wp::cursor_shape::v1::client::{
+            wp_cursor_shape_device_v1::{self, WpCursorShapeDeviceV1},
+            wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
         };
         use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
             zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
             zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1},
         };
+
+        /// Bytes reserved for a single cursor image (256 KiB = 256x256 ARGB).
+        const CURSOR_SLOT_BYTES: usize = 256 * 1024;
+        /// Rotating slots; a buffer is retired before its slot is rewritten.
+        const CURSOR_SLOT_COUNT: usize = 4;
+
+        /// Remote pointer shape requested by the RDP server.
+        #[derive(Clone, PartialEq, Eq)]
+        enum CursorRequest {
+            /// Compositor default cursor (RDP `SetDefault`).
+            Default,
+            /// Fully transparent 1x1 cursor (RDP `SetHidden`).
+            ///
+            /// Hiding via `wl_pointer.set_cursor(surface = NULL)` makes Mutter
+            /// resolve `CLUTTER_CURSOR_INHERIT`, which aborts GNOME Shell 51
+            /// (gnome-shell#9444). A transparent custom surface never does.
+            Hidden,
+            /// Pixel-exact remote cursor bitmap, straight-alpha ARGB.
+            Bitmap {
+                width: u32,
+                height: u32,
+                hot_x: i32,
+                hot_y: i32,
+                pixels: Vec<i32>,
+            },
+        }
+
+        /// `wl_surface` plus shared-memory pool used to publish cursor images.
+        struct CursorSurface {
+            surface: wl_surface::WlSurface,
+            pool: wl_shm_pool::WlShmPool,
+            file: OwnedFd,
+            buffers: Vec<wl_buffer::WlBuffer>,
+            next_slot: usize,
+            request: CursorRequest,
+            dirty: bool,
+        }
+
+        impl CursorSurface {
+            fn new(
+                compositor: &wl_compositor::WlCompositor,
+                shm: &wl_shm::WlShm,
+                qh: &QueueHandle<WaylandState>,
+            ) -> Result<Self, String> {
+                let len = CURSOR_SLOT_BYTES * CURSOR_SLOT_COUNT;
+                let file = create_anonymous_file(len)?;
+                let pool = shm.create_pool(file.as_fd(), len as i32, qh, ());
+                let surface = compositor.create_surface(qh, ());
+                Ok(Self {
+                    surface,
+                    pool,
+                    file,
+                    buffers: Vec::new(),
+                    next_slot: 0,
+                    request: CursorRequest::Default,
+                    dirty: false,
+                })
+            }
+
+            /// Copy one cursor image into shared memory and attach it.
+            fn upload(
+                &mut self,
+                width: usize,
+                height: usize,
+                pixels: &[i32],
+                qh: &QueueHandle<WaylandState>,
+            ) -> bool {
+                let len = width * height * 4;
+                if width == 0
+                    || height == 0
+                    || len > CURSOR_SLOT_BYTES
+                    || pixels.len() < width * height
+                {
+                    return false;
+                }
+
+                let slot = self.next_slot % CURSOR_SLOT_COUNT;
+                self.next_slot = self.next_slot.wrapping_add(1);
+                if self.buffers.len() >= CURSOR_SLOT_COUNT {
+                    if let Some(retired) = self.buffers.first() {
+                        retired.destroy();
+                    }
+                    self.buffers.remove(0);
+                }
+
+                // SAFETY: the descriptor outlives the mapping, the offset is
+                // slot aligned and `len` stays inside the file.
+                unsafe {
+                    let offset = (slot * CURSOR_SLOT_BYTES) as libc::off_t;
+                    let base = libc::mmap(
+                        std::ptr::null_mut(),
+                        len,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_SHARED,
+                        self.file.as_raw_fd(),
+                        offset,
+                    );
+                    if base == libc::MAP_FAILED {
+                        log::warn!("Could not map cursor shared memory");
+                        return false;
+                    }
+                    let dst = std::slice::from_raw_parts_mut(base.cast::<u8>(), len);
+                    for (index, pixel) in pixels.iter().take(width * height).enumerate() {
+                        let value = *pixel as u32;
+                        let alpha = (value >> 24) & 0xFF;
+                        let red = (value >> 16) & 0xFF;
+                        let green = (value >> 8) & 0xFF;
+                        let blue = value & 0xFF;
+                        // wl_shm ARGB8888 is premultiplied, little-endian B,G,R,A.
+                        dst[index * 4] = ((blue * alpha + 127) / 255) as u8;
+                        dst[index * 4 + 1] = ((green * alpha + 127) / 255) as u8;
+                        dst[index * 4 + 2] = ((red * alpha + 127) / 255) as u8;
+                        dst[index * 4 + 3] = alpha as u8;
+                    }
+                    libc::munmap(base, len);
+                }
+
+                let buffer = self.pool.create_buffer(
+                    (slot * CURSOR_SLOT_BYTES) as i32,
+                    width as i32,
+                    height as i32,
+                    (width * 4) as i32,
+                    wl_shm::Format::Argb8888,
+                    qh,
+                    (),
+                );
+                self.surface.attach(Some(&buffer), 0, 0);
+                self.surface.damage(0, 0, width as i32, height as i32);
+                self.surface.commit();
+                self.buffers.push(buffer);
+                true
+            }
+
+            fn apply(
+                &mut self,
+                pointer: &wl_pointer::WlPointer,
+                shape_device: Option<&WpCursorShapeDeviceV1>,
+                serial: u32,
+                qh: &QueueHandle<WaylandState>,
+            ) {
+                match self.request.clone() {
+                    CursorRequest::Default => {
+                        if let Some(device) = shape_device {
+                            log::debug!("native cursor: compositor default");
+                            device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Default);
+                        }
+                    }
+                    CursorRequest::Hidden => {
+                        if self.upload(1, 1, &[0], qh) {
+                            log::debug!("native cursor: hidden");
+                            pointer.set_cursor(serial, Some(&self.surface), 0, 0);
+                        }
+                    }
+                    CursorRequest::Bitmap {
+                        width,
+                        height,
+                        hot_x,
+                        hot_y,
+                        pixels,
+                    } => {
+                        if self.upload(width as usize, height as usize, &pixels, qh) {
+                            log::debug!("native cursor: bitmap {width}x{height} @ {hot_x},{hot_y}");
+                            pointer.set_cursor(serial, Some(&self.surface), hot_x, hot_y);
+                        }
+                    }
+                }
+            }
+
+            fn destroy(&mut self) {
+                for buffer in self.buffers.drain(..) {
+                    buffer.destroy();
+                }
+                self.pool.destroy();
+                self.surface.destroy();
+            }
+        }
+
+        /// Anonymous shared-memory file backing the cursor pool.
+        fn create_anonymous_file(len: usize) -> Result<OwnedFd, String> {
+            let name = std::ffi::CString::new("rust-rdp-vnc-cursor").expect("static name");
+            // SAFETY: `name` is a valid NUL-terminated C string.
+            let raw =
+                unsafe { libc::memfd_create(name.as_ptr(), libc::MFD_CLOEXEC as libc::c_uint) };
+            if raw < 0 {
+                return Err(format!("cursor memfd: {}", std::io::Error::last_os_error()));
+            }
+            // SAFETY: `raw` is a fresh descriptor owned by this process.
+            let file = unsafe { OwnedFd::from_raw_fd(raw) };
+            // SAFETY: resizing our own descriptor.
+            if unsafe { libc::ftruncate(file.as_raw_fd(), len as libc::off_t) } < 0 {
+                return Err(format!(
+                    "cursor ftruncate: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(file)
+        }
 
         pub(super) struct WaylandCapture {
             connection: Connection,
@@ -362,6 +606,9 @@ mod linux {
             manager: ZwpKeyboardShortcutsInhibitManagerV1,
             seat: wl_seat::WlSeat,
             keyboard: wl_keyboard::WlKeyboard,
+            pointer: wl_pointer::WlPointer,
+            shape_device: Option<WpCursorShapeDeviceV1>,
+            cursor: CursorSurface,
             surface: wl_surface::WlSurface,
             inhibitor: Option<ZwpKeyboardShortcutsInhibitorV1>,
         }
@@ -371,6 +618,8 @@ mod linux {
             active: bool,
             super_keys_down: [bool; 2],
             pending_scancodes: Vec<(i32, bool, bool)>,
+            cursor_serial: Option<u32>,
+            cursor_dirty: bool,
         }
 
         const KEY_LEFTMETA: u32 = 125;
@@ -411,6 +660,22 @@ mod linux {
                 let surface = wl_surface::WlSurface::from_id(&connection, surface_id)
                     .map_err(display_error)?;
                 let keyboard = seat.get_keyboard(&qh, ());
+                let pointer = seat.get_pointer(&qh, ());
+                let compositor = globals
+                    .bind::<wl_compositor::WlCompositor, _, _>(
+                        &qh,
+                        1..=wl_compositor::WlCompositor::interface().version,
+                        (),
+                    )
+                    .map_err(display_error)?;
+                let shm = globals
+                    .bind::<wl_shm::WlShm, _, _>(&qh, 1..=1, ())
+                    .map_err(display_error)?;
+                let shape_device = globals
+                    .bind::<WpCursorShapeManagerV1, _, _>(&qh, 1..=2, ())
+                    .ok()
+                    .map(|manager| manager.get_pointer(&pointer, &qh, ()));
+                let cursor = CursorSurface::new(&compositor, &shm, &qh)?;
                 connection.flush().map_err(display_error)?;
 
                 Ok(Self {
@@ -420,9 +685,70 @@ mod linux {
                     manager,
                     seat,
                     keyboard,
+                    pointer,
+                    shape_device,
+                    cursor,
                     surface,
                     inhibitor: None,
                 })
+            }
+
+            /// Publish the remote cursor shape for the next repaint.
+            pub(super) fn set_cursor_bitmap(
+                &mut self,
+                width: i32,
+                height: i32,
+                hot_x: i32,
+                hot_y: i32,
+                pixels: &[i32],
+            ) {
+                let request = CursorRequest::Bitmap {
+                    width: width.max(0) as u32,
+                    height: height.max(0) as u32,
+                    hot_x,
+                    hot_y,
+                    pixels: pixels.to_vec(),
+                };
+                if self.cursor.request != request {
+                    self.cursor.request = request;
+                    self.cursor.dirty = true;
+                }
+            }
+
+            pub(super) fn set_cursor_hidden(&mut self) {
+                if self.cursor.request != CursorRequest::Hidden {
+                    self.cursor.request = CursorRequest::Hidden;
+                    self.cursor.dirty = true;
+                }
+            }
+
+            pub(super) fn set_cursor_default(&mut self) {
+                if self.cursor.request != CursorRequest::Default {
+                    self.cursor.request = CursorRequest::Default;
+                    self.cursor.dirty = true;
+                }
+            }
+
+            /// Flush a pending cursor request once the compositor gave us a
+            /// pointer focus serial.
+            pub(super) fn sync_cursor(&mut self) {
+                if let Err(error) = self.queue.dispatch_pending(&mut self.state) {
+                    log::debug!("Could not dispatch Wayland pointer state: {error}");
+                }
+                if std::mem::take(&mut self.state.cursor_dirty) {
+                    self.cursor.dirty = true;
+                }
+                if !self.cursor.dirty {
+                    return;
+                }
+                let Some(serial) = self.state.cursor_serial else {
+                    return;
+                };
+                self.cursor.dirty = false;
+                let qh = self.queue.handle();
+                self.cursor
+                    .apply(&self.pointer, self.shape_device.as_ref(), serial, &qh);
+                let _ = self.connection.flush();
             }
 
             pub(super) fn set_captured(&mut self, captured: bool) -> Result<(), String> {
@@ -468,6 +794,13 @@ mod linux {
                 if self.keyboard.version() >= 3 {
                     self.keyboard.release();
                 }
+                if let Some(device) = self.shape_device.take() {
+                    device.destroy();
+                }
+                self.cursor.destroy();
+                if self.pointer.version() >= 3 {
+                    self.pointer.release();
+                }
                 self.manager.destroy();
                 if self.seat.version() >= 5 {
                     self.seat.release();
@@ -492,6 +825,37 @@ mod linux {
         wayland_client::delegate_noop!(
             WaylandState: ZwpKeyboardShortcutsInhibitManagerV1
         );
+        wayland_client::delegate_noop!(WaylandState: ignore wl_compositor::WlCompositor);
+        wayland_client::delegate_noop!(WaylandState: ignore wl_shm::WlShm);
+        wayland_client::delegate_noop!(WaylandState: ignore wl_shm_pool::WlShmPool);
+        wayland_client::delegate_noop!(WaylandState: ignore wl_buffer::WlBuffer);
+        wayland_client::delegate_noop!(WaylandState: ignore wl_surface::WlSurface);
+        wayland_client::delegate_noop!(WaylandState: ignore WpCursorShapeManagerV1);
+        wayland_client::delegate_noop!(WaylandState: ignore WpCursorShapeDeviceV1);
+
+        impl Dispatch<wl_pointer::WlPointer, ()> for WaylandState {
+            fn event(
+                state: &mut Self,
+                _: &wl_pointer::WlPointer,
+                event: wl_pointer::Event,
+                _: &(),
+                _: &Connection,
+                _: &QueueHandle<Self>,
+            ) {
+                match event {
+                    wl_pointer::Event::Enter { serial, .. } => {
+                        state.cursor_serial = Some(serial);
+                        // The serial delivered here is the one the compositor
+                        // accepts for `set_cursor`; re-publish the shape.
+                        state.cursor_dirty = true;
+                    }
+                    wl_pointer::Event::Leave { .. } => {
+                        state.cursor_serial = None;
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandState {
             fn event(
@@ -505,11 +869,9 @@ mod linux {
                 match event {
                     wl_keyboard::Event::Enter { keys, .. } => {
                         state.super_keys_down = [false; 2];
-                        for bytes in keys.chunks_exact(4) {
-                            let key = u32::from_ne_bytes(
-                                bytes.try_into().expect("four-byte Wayland keycode"),
-                            );
-                            state.set_super_key(key, true);
+                        let (keycodes, _) = keys.as_chunks::<4>();
+                        for bytes in keycodes {
+                            state.set_super_key(u32::from_ne_bytes(*bytes), true);
                         }
                     }
                     wl_keyboard::Event::Leave { .. } => {
@@ -669,7 +1031,11 @@ mod windows {
             }
         }
 
-        let hhk = HOOK_HANDLE.lock().ok().and_then(|h| *h).unwrap_or(std::ptr::null_mut());
+        let hhk = HOOK_HANDLE
+            .lock()
+            .ok()
+            .and_then(|h| *h)
+            .unwrap_or(std::ptr::null_mut());
         CallNextHookEx(hhk, n_code, w_param, l_param)
     }
 
@@ -768,4 +1134,24 @@ impl SystemInputCapture {
     pub fn poll_native_events(&mut self) -> Vec<(i32, bool, bool)> {
         Vec::new()
     }
+
+    pub fn drives_native_cursor(&self) -> bool {
+        false
+    }
+
+    pub fn set_cursor_bitmap(
+        &mut self,
+        _width: i32,
+        _height: i32,
+        _hot_x: i32,
+        _hot_y: i32,
+        _pixels: &[i32],
+    ) {
+    }
+
+    pub fn set_cursor_hidden(&mut self) {}
+
+    pub fn set_cursor_default(&mut self) {}
+
+    pub fn sync_cursor(&mut self) {}
 }

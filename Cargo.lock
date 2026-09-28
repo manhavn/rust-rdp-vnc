@@ -4238,6 +4238,7 @@ dependencies = [
  "egui",
  "env_logger 0.11.11",
  "image",
+ "libc",
  "log",
  "parking_lot",
  "raw-window-handle",

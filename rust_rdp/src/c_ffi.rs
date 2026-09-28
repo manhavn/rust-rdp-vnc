@@ -63,8 +63,14 @@ pub extern "C" fn rust_rdp_init() {
 
 /// Connect to an RDP or VNC server.
 /// Returns a monotonic session ID.
+///
+/// # Safety
+///
+/// Every pointer argument must either be null or point to a valid
+/// NUL-terminated string (or, for `user_data`, a caller-owned payload) that
+/// stays valid for the duration of the call.
 #[no_mangle]
-pub extern "C" fn rust_rdp_connect(
+pub unsafe extern "C" fn rust_rdp_connect(
     host: *const c_char,
     port: c_int,
     username: *const c_char,
@@ -115,12 +121,12 @@ pub extern "C" fn rust_rdp_connect(
 
     connect_session(
         host_str.to_string(),
-        port as i32,
+        port,
         user_str.to_string(),
         pass_str.to_string(),
         domain_str.to_string(),
-        width as i32,
-        height as i32,
+        width,
+        height,
         conn_mode_str.to_string(),
         cb,
     )
@@ -135,25 +141,25 @@ pub extern "C" fn rust_rdp_disconnect() {
 /// Send mouse position and click action.
 #[no_mangle]
 pub extern "C" fn rust_rdp_send_mouse_event(x: c_int, y: c_int, action: c_int) {
-    send_mouse_event(x as i32, y as i32, action as i32);
+    send_mouse_event(x, y, action);
 }
 
 /// Send vertical mouse wheel scroll.
 #[no_mangle]
 pub extern "C" fn rust_rdp_send_mouse_wheel_event(x: c_int, y: c_int, units: c_int) {
-    send_mouse_wheel_event(x as i32, y as i32, units as i32);
+    send_mouse_wheel_event(x, y, units);
 }
 
 /// Send horizontal mouse wheel scroll.
 #[no_mangle]
 pub extern "C" fn rust_rdp_send_mouse_horizontal_wheel_event(x: c_int, y: c_int, units: c_int) {
-    send_mouse_horizontal_wheel_event(x as i32, y as i32, units as i32);
+    send_mouse_horizontal_wheel_event(x, y, units);
 }
 
 /// Send character / key event.
 #[no_mangle]
 pub extern "C" fn rust_rdp_send_key_event(keycode: c_int, pressed: c_int) {
-    send_key_event(keycode as i32, pressed as i32);
+    send_key_event(keycode, pressed);
 }
 
 /// Send hardware scancode event.
@@ -163,5 +169,5 @@ pub extern "C" fn rust_rdp_send_scancode_event(
     is_extended: c_int,
     pressed: c_int,
 ) {
-    send_scancode_event(scancode as i32, is_extended != 0, pressed as i32);
+    send_scancode_event(scancode, is_extended != 0, pressed);
 }
