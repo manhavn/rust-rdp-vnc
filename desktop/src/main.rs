@@ -204,7 +204,16 @@ impl SessionCallback for UiCallback {
     fn on_cursor_changed(&self, cursor_type: i32) {
         let icon = match cursor_type {
             0 => egui::CursorIcon::Default,
-            1 => egui::CursorIcon::None,
+            // On Linux/Wayland, hiding the cursor via CursorIcon::None triggers
+            // wl_pointer.set_cursor(surface = NULL) in winit, which causes a fatal
+            // assertion failure in Mutter / GNOME Shell 51 (upstream issue #9444).
+            1 => {
+                if cfg!(target_os = "linux") {
+                    egui::CursorIcon::Default
+                } else {
+                    egui::CursorIcon::None
+                }
+            }
             2 => egui::CursorIcon::Text,
             3 => egui::CursorIcon::PointingHand,
             4 => egui::CursorIcon::ResizeNwSe,
@@ -2938,8 +2947,15 @@ impl DesktopApp {
         }
 
         let custom = self.tab().shared.custom_cursor.lock().clone();
+        // On Linux/Wayland, hiding the cursor via CursorIcon::None triggers
+        // wl_pointer.set_cursor(surface = NULL) while shortcuts are inhibited,
+        // causing a fatal Clutter assertion crash in GNOME Shell 51 (upstream issue #9444).
+        // Instead, rely on the analyzed native cursor shape (`current_cursor`), which
+        // renders smoothly at native display refresh rate without crashing the compositor.
+        let use_software_cursor = !cfg!(target_os = "linux") && custom.is_some();
+
         if view_focused || view_fullscreen {
-            if custom.is_some() && response.hovered() {
+            if use_software_cursor && response.hovered() {
                 ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::None);
             } else {
                 let cursor = *self.tab().shared.current_cursor.lock();
@@ -2949,39 +2965,41 @@ impl DesktopApp {
             ui.output_mut(|o| o.cursor_icon = egui::CursorIcon::Default);
         }
 
-        if let Some(c) = custom {
-            if let Some(pos) = response.hover_pos() {
-                let cursor_rect = egui::Rect::from_min_size(
-                    pos - egui::vec2(c.hot_x as f32, c.hot_y as f32),
-                    egui::vec2(c.width as f32, c.height as f32),
-                );
-                let color_pixels: Vec<egui::Color32> = c
-                    .pixels
-                    .iter()
-                    .map(|&p| {
-                        let u = p as u32;
-                        let a = ((u >> 24) & 0xFF) as u8;
-                        let r = ((u >> 16) & 0xFF) as u8;
-                        let g = ((u >> 8) & 0xFF) as u8;
-                        let b = (u & 0xFF) as u8;
-                        egui::Color32::from_rgba_unmultiplied(r, g, b, a)
-                    })
-                    .collect();
-                let color_image = egui::ColorImage {
-                    size: [c.width as usize, c.height as usize],
-                    pixels: color_pixels,
-                };
-                let texture = ui.ctx().load_texture(
-                    "custom_cursor",
-                    color_image,
-                    egui::TextureOptions::NEAREST,
-                );
-                ui.painter().image(
-                    texture.id(),
-                    cursor_rect,
-                    egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                    egui::Color32::WHITE,
-                );
+        if use_software_cursor {
+            if let Some(c) = custom {
+                if let Some(pos) = response.hover_pos() {
+                    let cursor_rect = egui::Rect::from_min_size(
+                        pos - egui::vec2(c.hot_x as f32, c.hot_y as f32),
+                        egui::vec2(c.width as f32, c.height as f32),
+                    );
+                    let color_pixels: Vec<egui::Color32> = c
+                        .pixels
+                        .iter()
+                        .map(|&p| {
+                            let u = p as u32;
+                            let a = ((u >> 24) & 0xFF) as u8;
+                            let r = ((u >> 16) & 0xFF) as u8;
+                            let g = ((u >> 8) & 0xFF) as u8;
+                            let b = (u & 0xFF) as u8;
+                            egui::Color32::from_rgba_unmultiplied(r, g, b, a)
+                        })
+                        .collect();
+                    let color_image = egui::ColorImage {
+                        size: [c.width as usize, c.height as usize],
+                        pixels: color_pixels,
+                    };
+                    let texture = ui.ctx().load_texture(
+                        "custom_cursor",
+                        color_image,
+                        egui::TextureOptions::NEAREST,
+                    );
+                    ui.painter().image(
+                        texture.id(),
+                        cursor_rect,
+                        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                        egui::Color32::WHITE,
+                    );
+                }
             }
         }
         if connected && (view_focused || view_fullscreen) {

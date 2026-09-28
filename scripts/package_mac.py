@@ -62,9 +62,9 @@ def package_target(target_dir, target_name):
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0.8</string>
+    <string>1.0.9</string>
     <key>CFBundleVersion</key>
-    <string>1.0.8</string>
+    <string>1.0.9</string>
     <key>LSMinimumSystemVersion</key>
     <string>11.0</string>
     <key>NSHighResolutionCapable</key>
