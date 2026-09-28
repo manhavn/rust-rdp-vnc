@@ -2367,6 +2367,32 @@ fn analyze_cursor_pixels(
     let hx = hot_x as usize;
     let hy = hot_y as usize;
 
+    // 1. Hotspot at top-left corner (0..1, 0..1):
+    // Standard Arrow cursor (OCR_NORMAL) or Arrow+Hourglass/Spinner (AppStarting).
+    // An I-Beam, resize, move, or crosshair cursor NEVER has hotspot at (0, 0)!
+    if hx <= 1 && hy <= 1 {
+        if total_visible >= 25 && max_x >= 18 && max_y >= 18 {
+            let mut q_br_sub = 0usize;
+            for y in 14..h {
+                for x in 14..w {
+                    let p = pixels[y * w + x] as u32;
+                    if ((p >> 24) & 0xFF) > 32 {
+                        q_br_sub += 1;
+                    }
+                }
+            }
+            if q_br_sub >= 6 {
+                return 15; // Progress / AppStarting
+            }
+        }
+        return 0; // Default Arrow
+    }
+
+    // 2. Pointing Hand (extended index finger with tip at hx, hy)
+    if hy <= 6 && hx >= 3 && span_x >= 8 && span_y >= 10 {
+        return 3; // PointingHand
+    }
+
     let mut top_row_w = 0usize;
     let mut bot_row_w = 0usize;
     for x in min_x..=max_x {
@@ -2380,20 +2406,20 @@ fn analyze_cursor_pixels(
         }
     }
 
-    // 1. Vertical Resize (^) vs Text I-Beam
+    // 3. Vertical Resize (^) vs Text I-Beam
     if span_y >= 8 && span_x <= 15 && span_y >= (span_x * 12) / 10 {
         // NS resize has pointed arrow tip (1 or 2 pixels) at top AND bottom
-        if top_row_w <= 2 && bot_row_w <= 2 && span_x >= 5 {
+        if top_row_w <= 2 && bot_row_w <= 2 && span_x >= 7 {
             return 7; // ResizeNorth (NS)
         }
         // Text I-Beam: tall, narrow, top and bottom serifs or single line
-        if (hx as isize - center_x as isize).abs() <= 3 || span_x <= 4 {
+        if (hx as isize - center_x as isize).abs() <= 3 || span_x <= 5 {
             return 2; // Text
         }
     }
 
-    // 2. Horizontal Resize (<->)
-    if span_x >= 10 && span_y <= 15 && span_x >= (span_y * 13) / 10 {
+    // 4. Horizontal Resize (<->)
+    if span_x >= 10 && span_y <= 13 && span_x >= (span_y * 13) / 10 {
         return 6; // ResizeEast (EW)
     }
 
@@ -2420,31 +2446,60 @@ fn analyze_cursor_pixels(
         }
     }
 
-    // 3. Diagonal Resize NW-SE (\)
+    // 5. Diagonal Resize NW-SE (\)
     if (q_tl + q_br) > (q_tr + q_bl) * 2 && total_visible >= 8 && span_x >= 8 && span_y >= 8 {
         return 4; // ResizeNwSe
     }
 
-    // 4. Diagonal Resize NE-SW (/)
+    // 6. Diagonal Resize NE-SW (/)
     if (q_tr + q_bl) > (q_tl + q_br) * 2 && total_visible >= 8 && span_x >= 8 && span_y >= 8 {
         return 5; // ResizeNeSw
     }
 
-    // 5. Move (+)
-    if span_x >= 12 && span_y >= 12 && q_tl >= 2 && q_tr >= 2 && q_bl >= 2 && q_br >= 2 {
-        if (hx as isize - center_x as isize).abs() <= 4 && (hy as isize - center_y as isize).abs() <= 4 {
-            return 10; // Move
+    // 7. Move (+) vs Crosshair (+) vs Wait (Hourglass)
+    if span_x >= 10 && span_y >= 10 {
+        let mut row_mid = 0usize;
+        let mut col_mid = 0usize;
+        for x in min_x..=max_x {
+            let p = pixels[center_y * w + x] as u32;
+            if ((p >> 24) & 0xFF) > 32 { row_mid += 1; }
+        }
+        for y in min_y..=max_y {
+            let p = pixels[y * w + center_x] as u32;
+            if ((p >> 24) & 0xFF) > 32 { col_mid += 1; }
+        }
+
+        // Crosshair: thin horizontal and vertical lines crossing at center
+        if row_mid >= (span_x * 7) / 10 && col_mid >= (span_y * 7) / 10 && total_visible <= (span_x + span_y) * 2 {
+            return 9; // Crosshair
+        }
+
+        // Wait (Hourglass): narrow middle, wide top and bottom
+        let mut mid_y_w = 0usize;
+        let mut top_y_w = 0usize;
+        let mut bot_y_w = 0usize;
+        if min_y + 2 < max_y && max_y >= 2 {
+            for x in min_x..=max_x {
+                if ((pixels[center_y * w + x] as u32 >> 24) & 0xFF) > 32 { mid_y_w += 1; }
+                if ((pixels[(min_y + 2) * w + x] as u32 >> 24) & 0xFF) > 32 { top_y_w += 1; }
+                if ((pixels[(max_y - 2) * w + x] as u32 >> 24) & 0xFF) > 32 { bot_y_w += 1; }
+            }
+            if top_y_w >= 6 && bot_y_w >= 6 && mid_y_w <= 4 && span_y >= 12 {
+                return 8; // Wait
+            }
+        }
+
+        // Move: 4 arrows in all 4 quadrants
+        if q_tl >= 2 && q_tr >= 2 && q_bl >= 2 && q_br >= 2 {
+            if (hx as isize - center_x as isize).abs() <= 4 && (hy as isize - center_y as isize).abs() <= 4 {
+                return 10; // Move
+            }
         }
     }
 
-    // 6. Default Arrow (standard arrow cursor has hotspot at top-left corner)
+    // 8. Fallback for standard arrow pointing with hotspot <= 2
     if hx <= 2 && hy <= 2 {
         return 0; // Default Arrow
-    }
-
-    // 7. Hand (finger tip hotspot, palm below)
-    if hy <= 8 && span_x >= 8 && span_y >= 10 {
-        return 3; // PointingHand
     }
 
     0
