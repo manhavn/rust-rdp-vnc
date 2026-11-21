@@ -30,5 +30,4 @@ ironrdp-core = { git = "https://github.com/Devolutions/IronRDP.git", rev = "4057
 ironrdp-dvc = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
 ironrdp-egfx = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
 ironrdp-svc = { git = "https://github.com/Devolutions/IronRDP.git", rev = "405770e" }
-anyhow = "1.0"
 vnc-rs = "*"
