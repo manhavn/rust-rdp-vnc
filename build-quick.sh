@@ -272,14 +272,23 @@ build_and_package() {
         echo -e "\n${RED}${BOLD}✘ Packaging incomplete for $target - expected .deb, .rpm and .tar.gz.${NC}"
         exit 1
     fi
+
+    cp "$dist_dir"/*.deb "$dist_dir"/*.rpm "$dist_dir"/*.tar.gz "$COMMON_DIST/"
 }
+
+# Gather every target's packages into one folder for easy upload.
+COMMON_DIST="$DIR/dist/upload"
+rm -rf "$COMMON_DIST"
+mkdir -p "$COMMON_DIST"
 
 for target in "${TARGETS[@]}"; do
     build_and_package "$target"
 done
 
 echo -e "\n${GREEN}${BOLD}✔ Quick Build & Packaging Completed Successfully!${NC}"
-echo -e "${CYAN}Output Packages:${NC}"
+echo -e "${CYAN}Upload folder (all targets):${NC} ${BOLD}$COMMON_DIST/${NC}"
+ls -lh "$COMMON_DIST"/* 2>/dev/null || true
+echo -e "\n${CYAN}Per-target outputs:${NC}"
 for target in "${TARGETS[@]}"; do
     echo -e "  ${BOLD}$DIR/dist/$target/${NC}"
     ls -lh "$DIR/dist/$target"/* 2>/dev/null || true
