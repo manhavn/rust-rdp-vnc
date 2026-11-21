@@ -40,6 +40,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import android.content.res.Configuration
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalFocusManager
@@ -1266,7 +1267,9 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var isWinPressed by remember { mutableStateOf(false) }
 
     val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
+    var isInputFocused by remember { mutableStateOf(false) }
     var isRealtimeKeyboardActive by remember { mutableStateOf(false) }
     var showFullKeyboard by remember { mutableStateOf(false) }
 
@@ -1295,10 +1298,15 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
 
     val isAnyKeyboardActive = isRealtimeKeyboardActive || showKeyboardInput || showFullKeyboard
     androidx.activity.compose.BackHandler(enabled = isAnyKeyboardActive) {
-        isRealtimeKeyboardActive = false
-        showKeyboardInput = false
-        showFullKeyboard = false
-        releaseAllModifiers()
+        if (showKeyboardInput && isInputFocused) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        } else {
+            isRealtimeKeyboardActive = false
+            showKeyboardInput = false
+            showFullKeyboard = false
+            releaseAllModifiers()
+        }
     }
 
     var realtimeKeyboardImeShown by remember { mutableStateOf(false) }
@@ -1315,6 +1323,8 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     LaunchedEffect(showKeyboardInput) {
         if (!showKeyboardInput) {
             showKeyboardImeShown = false
+            isInputFocused = false
+            releaseAllModifiers()
         }
     }
 
@@ -1332,17 +1342,10 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                 releaseAllModifiers()
             }
             if (showKeyboardInput && showKeyboardImeShown) {
-                showKeyboardInput = false
-                releaseAllModifiers()
+                focusManager.clearFocus()
             }
             realtimeKeyboardImeShown = false
             showKeyboardImeShown = false
-        }
-    }
-
-    LaunchedEffect(showKeyboardInput) {
-        if (!showKeyboardInput) {
-            releaseAllModifiers()
         }
     }
 
@@ -2388,7 +2391,9 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                                 }
                             }
                         ),
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .onFocusChanged { isInputFocused = it.isFocused },
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = MaterialTheme.colorScheme.primary,
                             unfocusedBorderColor = Color(0xFF475569)
