@@ -81,6 +81,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -111,6 +112,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 
 enum class MouseMode {
     MOVE, DRAG, CURSOR
+}
+
+enum class FullKeyboardMode {
+    ROW_SCROLL, ALL_SCROLL, FIT_SCREEN
 }
 
 class MainActivity : ComponentActivity() {
@@ -1212,7 +1217,8 @@ fun KeyboardButton(
     keyPadding: PaddingValues,
     fontSize: androidx.compose.ui.unit.TextUnit,
     minWidth: androidx.compose.ui.unit.Dp = 42.dp,
-    containerColor: Color = Color(0xFF1E293B)
+    containerColor: Color = Color(0xFF1E293B),
+    modifier: Modifier = Modifier
 ) {
     RepeatingButton(
         onClick = { RdpClient.sendScancodeEvent(scancodePair.first, scancodePair.second, 1) },
@@ -1221,10 +1227,52 @@ fun KeyboardButton(
         containerColor = containerColor,
         pressedColor = Color(0xFF6366F1),
         contentPadding = keyPadding,
-        modifier = Modifier.height(keyHeight).widthIn(min = minWidth),
+        modifier = modifier.height(keyHeight).widthIn(min = minWidth),
         shape = RoundedCornerShape(4.dp)
     ) {
-        Text(label, fontSize = if (label == "▲") 16.sp else fontSize, color = Color.White)
+        Text(
+            text = label,
+            fontSize = if (label == "▲" && minWidth > 0.dp) 16.sp else fontSize,
+            color = Color.White,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.Center
+        )
+    }
+}
+
+@Composable
+fun KeyboardModifierButton(
+    label: String,
+    isPressed: Boolean,
+    onClick: () -> Unit,
+    keyHeight: androidx.compose.ui.unit.Dp,
+    keyPadding: PaddingValues,
+    fontSize: androidx.compose.ui.unit.TextUnit,
+    minWidth: androidx.compose.ui.unit.Dp,
+    boldWhenActive: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onClick,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (isPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)
+        ),
+        contentPadding = keyPadding,
+        modifier = modifier.height(keyHeight).widthIn(min = minWidth),
+        shape = RoundedCornerShape(4.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = fontSize,
+            color = if (isPressed) Color.Black else Color.White,
+            fontWeight = if (boldWhenActive && isPressed) FontWeight.Bold else FontWeight.Normal,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            textAlign = TextAlign.Center
+        )
     }
 }
 
@@ -1272,6 +1320,15 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var isInputFocused by remember { mutableStateOf(false) }
     var isRealtimeKeyboardActive by remember { mutableStateOf(false) }
     var showFullKeyboard by remember { mutableStateOf(false) }
+    var fullKeyboardMode by remember {
+        val savedMode = sharedPrefs.getString("fullKeyboardMode", FullKeyboardMode.ROW_SCROLL.name)
+        val initialMode = try {
+            FullKeyboardMode.valueOf(savedMode ?: FullKeyboardMode.ROW_SCROLL.name)
+        } catch (e: Exception) {
+            FullKeyboardMode.ROW_SCROLL
+        }
+        mutableStateOf(initialMode)
+    }
 
     fun releaseAllModifiers() {
         if (isMouseHeld) {
@@ -2108,16 +2165,91 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                     .padding(8.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
-                    val keyHeight = 36.dp
-                    val keyPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
-                    val fontSize = 13.sp
+                val isFitScreen = fullKeyboardMode == FullKeyboardMode.FIT_SCREEN
+                val isAllScroll = fullKeyboardMode == FullKeyboardMode.ALL_SCROLL
 
+                val keyHeight = if (isFitScreen && isPortrait) 32.dp else 36.dp
+                val keyPadding = if (isFitScreen) {
+                    PaddingValues(horizontal = 1.dp, vertical = 0.dp)
+                } else {
+                    PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                }
+                val keySpacing = if (isFitScreen) 2.dp else 4.dp
+                val fontSize = 13.sp
+                val allScrollState = rememberScrollState()
+
+                fun fitKeyFontSize(label: String): androidx.compose.ui.unit.TextUnit {
+                    return when {
+                        label.length >= 7 -> if (isPortrait) 6.sp else 8.sp
+                        label.length >= 5 -> if (isPortrait) 7.sp else 9.sp
+                        label.length >= 3 -> if (isPortrait) 8.sp else 10.sp
+                        else -> if (isPortrait) 10.sp else 12.sp
+                    }
+                }
+
+                @Composable
+                fun fullKeyRowModifier(): Modifier {
+                    val rowScrollState = rememberScrollState()
+                    return when (fullKeyboardMode) {
+                        FullKeyboardMode.ROW_SCROLL -> Modifier.fillMaxWidth().horizontalScroll(rowScrollState)
+                        FullKeyboardMode.ALL_SCROLL -> Modifier
+                        FullKeyboardMode.FIT_SCREEN -> Modifier.fillMaxWidth()
+                    }
+                }
+
+                // Mode Switcher Bar: Row Scroll (default) | Scroll All | Fit Screen
+                val modeOptions = listOf(
+                    FullKeyboardMode.ROW_SCROLL to "Row Scroll",
+                    FullKeyboardMode.ALL_SCROLL to "Scroll All",
+                    FullKeyboardMode.FIT_SCREEN to "Fit Screen"
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(Color(0xFF1E293B), RoundedCornerShape(6.dp))
+                        .padding(2.dp),
+                    horizontalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    for ((mode, modeLabel) in modeOptions) {
+                        val selected = fullKeyboardMode == mode
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(26.dp)
+                                .background(
+                                    color = if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = RoundedCornerShape(4.dp)
+                                )
+                                .clickable {
+                                    fullKeyboardMode = mode
+                                    sharedPrefs.edit().putString("fullKeyboardMode", mode.name).apply()
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = modeLabel,
+                                color = if (selected) Color.Black else Color(0xFF94A3B8),
+                                fontSize = 11.sp,
+                                fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                Column(
+                    modifier = if (isAllScroll) {
+                        Modifier.fillMaxWidth().horizontalScroll(allScrollState)
+                    } else {
+                        Modifier.fillMaxWidth()
+                    },
+                    verticalArrangement = Arrangement.spacedBy(if (isFitScreen) 4.dp else 6.dp)
+                ) {
                     // Control & Media Row: Volume, Brightness, Play/Pause, Mouse Next/Prev, etc.
                     Row(
-                        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing)
                     ) {
-                        // Mouse Extra Buttons (using arbitrary scancodes, often handled as mouse events, but here we use typical extended keycodes for Back/Forward)
                         val controlKeys = listOf(
                             "Mute" to Pair(0x20, true), "Vol-" to Pair(0x2E, true), "Vol+" to Pair(0x30, true),
                             "Prev" to Pair(0x10, true), "Play/Pause" to Pair(0x22, true), "Next" to Pair(0x19, true), "Stop" to Pair(0x24, true),
@@ -2128,231 +2260,273 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                             "PrtScn" to Pair(0x37, true), "Insert" to Pair(0x52, true)
                         )
                         for ((label, scancodePair) in controlKeys) {
+                            val weight = when {
+                                label.length >= 9 -> 1.4f
+                                label.length >= 6 -> 1.2f
+                                else -> 1f
+                            }
                             KeyboardButton(
                                 label = label,
                                 scancodePair = scancodePair,
                                 keyHeight = keyHeight,
                                 keyPadding = keyPadding,
-                                fontSize = 11.sp,
-                                minWidth = 46.dp,
-                                containerColor = Color(0xFF334155)
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else 11.sp,
+                                minWidth = if (isFitScreen) 0.dp else 46.dp,
+                                containerColor = Color(0xFF334155),
+                                modifier = if (isFitScreen) Modifier.weight(weight) else Modifier
                             )
                         }
                     }
 
-                    // Row 1: ESC, F1-F12, DEL
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val row1Keys = listOf(
-                        "ESC" to Pair(0x01, false), "`" to Pair(0x29, false), "1" to Pair(0x02, false), "2" to Pair(0x03, false),
-                        "3" to Pair(0x04, false), "4" to Pair(0x05, false), "5" to Pair(0x06, false), "6" to Pair(0x07, false),
-                        "7" to Pair(0x08, false), "8" to Pair(0x09, false), "9" to Pair(0x0A, false), "0" to Pair(0x0B, false),
-                        "-" to Pair(0x0C, false), "=" to Pair(0x0D, false), "BACKSP" to Pair(0x0E, false)
-                    )
-                    for ((label, scancodePair) in row1Keys) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
-                            keyHeight = keyHeight,
-                            keyPadding = keyPadding,
-                            fontSize = fontSize,
-                            minWidth = if (label == "BACKSP") 64.dp else 42.dp
-                        )
-                    }
-                }
-
-                // Row 2: TAB, Q-P, [, ], \, DEL, HOME
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
-                ) {
-                    val row2Keys = listOf(
-                        "TAB" to Pair(0x0F, false), "Q" to Pair(0x10, false), "W" to Pair(0x11, false), "E" to Pair(0x12, false),
-                        "R" to Pair(0x13, false), "T" to Pair(0x14, false), "Y" to Pair(0x15, false), "U" to Pair(0x16, false),
-                        "I" to Pair(0x17, false), "O" to Pair(0x18, false), "P" to Pair(0x19, false), "[" to Pair(0x1A, false),
-                        "]" to Pair(0x1B, false), "\\" to Pair(0x2B, false), "DEL" to Pair(0x53, true), "HOME" to Pair(0x47, true)
-                    )
-                    for ((label, scancodePair) in row2Keys) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
-                            keyHeight = keyHeight,
-                            keyPadding = keyPadding,
-                            fontSize = fontSize,
-                            minWidth = if (label == "TAB" || label == "HOME") 60.dp else 42.dp
-                        )
-                    }
-                }
-
-                // Row 3: CAPS, A-L, ;, ', ENTER, END, PGUP
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Caps Lock (Toggle)
-                    var isCapsPressed by remember { mutableStateOf(false) }
-                    Button(
-                        onClick = {
-                            isCapsPressed = !isCapsPressed
-                            RdpClient.sendScancodeEvent(0x3A, false, 1)
-                            RdpClient.sendScancodeEvent(0x3A, false, 0)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isCapsPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)),
-                        contentPadding = keyPadding,
-                        modifier = Modifier.height(keyHeight).widthIn(min = 64.dp),
-                        shape = RoundedCornerShape(4.dp)
+                    // Row 1: ESC, 1-0, BACKSP
+                    Row(
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing)
                     ) {
-                        Text("CAPS", fontSize = fontSize, color = if (isCapsPressed) Color.Black else Color.White)
+                        val row1Keys = listOf(
+                            "ESC" to Pair(0x01, false), "`" to Pair(0x29, false), "1" to Pair(0x02, false), "2" to Pair(0x03, false),
+                            "3" to Pair(0x04, false), "4" to Pair(0x05, false), "5" to Pair(0x06, false), "6" to Pair(0x07, false),
+                            "7" to Pair(0x08, false), "8" to Pair(0x09, false), "9" to Pair(0x0A, false), "0" to Pair(0x0B, false),
+                            "-" to Pair(0x0C, false), "=" to Pair(0x0D, false), "BACKSP" to Pair(0x0E, false)
+                        )
+                        for ((label, scancodePair) in row1Keys) {
+                            val weight = when (label) {
+                                "BACKSP" -> 1.6f
+                                "ESC" -> 1.2f
+                                else -> 1f
+                            }
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else fontSize,
+                                minWidth = if (isFitScreen) 0.dp else if (label == "BACKSP") 64.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(weight) else Modifier
+                            )
+                        }
                     }
 
-                    val row3Keys = listOf(
-                        "A" to Pair(0x1E, false), "S" to Pair(0x1F, false), "D" to Pair(0x20, false), "F" to Pair(0x21, false),
-                        "G" to Pair(0x22, false), "H" to Pair(0x23, false), "J" to Pair(0x24, false), "K" to Pair(0x25, false),
-                        "L" to Pair(0x26, false), ";" to Pair(0x27, false), "'" to Pair(0x28, false), "ENTER" to Pair(0x1C, false),
-                        "END" to Pair(0x4F, true), "PGUP" to Pair(0x49, true)
-                    )
-                    for ((label, scancodePair) in row3Keys) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
+                    // Row 2: TAB, Q-P, [, ], \, DEL, HOME
+                    Row(
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing)
+                    ) {
+                        val row2Keys = listOf(
+                            "TAB" to Pair(0x0F, false), "Q" to Pair(0x10, false), "W" to Pair(0x11, false), "E" to Pair(0x12, false),
+                            "R" to Pair(0x13, false), "T" to Pair(0x14, false), "Y" to Pair(0x15, false), "U" to Pair(0x16, false),
+                            "I" to Pair(0x17, false), "O" to Pair(0x18, false), "P" to Pair(0x19, false), "[" to Pair(0x1A, false),
+                            "]" to Pair(0x1B, false), "\\" to Pair(0x2B, false), "DEL" to Pair(0x53, true), "HOME" to Pair(0x47, true)
+                        )
+                        for ((label, scancodePair) in row2Keys) {
+                            val weight = when (label) {
+                                "TAB" -> 1.4f
+                                "HOME" -> 1.3f
+                                "DEL" -> 1.2f
+                                else -> 1f
+                            }
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else fontSize,
+                                minWidth = if (isFitScreen) 0.dp else if (label == "TAB" || label == "HOME") 60.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(weight) else Modifier
+                            )
+                        }
+                    }
+
+                    // Row 3: CAPS, A-L, ;, ', ENTER, END, PGUP
+                    Row(
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        // Caps Lock (Toggle)
+                        var isCapsPressed by remember { mutableStateOf(false) }
+                        KeyboardModifierButton(
+                            label = "CAPS",
+                            isPressed = isCapsPressed,
+                            onClick = {
+                                isCapsPressed = !isCapsPressed
+                                RdpClient.sendScancodeEvent(0x3A, false, 1)
+                                RdpClient.sendScancodeEvent(0x3A, false, 0)
+                            },
                             keyHeight = keyHeight,
                             keyPadding = keyPadding,
-                            fontSize = fontSize,
-                            minWidth = if (label == "ENTER" || label == "PGUP") 64.dp else 42.dp
+                            fontSize = if (isFitScreen) fitKeyFontSize("CAPS") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 64.dp,
+                            boldWhenActive = false,
+                            modifier = if (isFitScreen) Modifier.weight(1.5f) else Modifier
                         )
-                    }
-                }
 
-                // Row 4: SHIFT, Z-M, ,, ., /, UP, PGDN
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Shift Toggle
-                    Button(
-                        onClick = {
-                            isShiftPressed = !isShiftPressed
-                            RdpClient.sendScancodeEvent(0x2A, false, if (isShiftPressed) 1 else 0)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isShiftPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)),
-                        contentPadding = keyPadding,
-                        modifier = Modifier.height(keyHeight).widthIn(min = 64.dp),
-                        shape = RoundedCornerShape(4.dp)
+                        val row3Keys = listOf(
+                            "A" to Pair(0x1E, false), "S" to Pair(0x1F, false), "D" to Pair(0x20, false), "F" to Pair(0x21, false),
+                            "G" to Pair(0x22, false), "H" to Pair(0x23, false), "J" to Pair(0x24, false), "K" to Pair(0x25, false),
+                            "L" to Pair(0x26, false), ";" to Pair(0x27, false), "'" to Pair(0x28, false), "ENTER" to Pair(0x1C, false),
+                            "END" to Pair(0x4F, true), "PGUP" to Pair(0x49, true)
+                        )
+                        for ((label, scancodePair) in row3Keys) {
+                            val weight = when (label) {
+                                "ENTER" -> 1.6f
+                                "PGUP" -> 1.3f
+                                "END" -> 1.2f
+                                else -> 1f
+                            }
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else fontSize,
+                                minWidth = if (isFitScreen) 0.dp else if (label == "ENTER" || label == "PGUP") 64.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(weight) else Modifier
+                            )
+                        }
+                    }
+
+                    // Row 4: SHIFT, Z-M, ,, ., /, UP, PGDN
+                    Row(
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Shift", fontSize = fontSize, color = if (isShiftPressed) Color.Black else Color.White, fontWeight = if (isShiftPressed) FontWeight.Bold else FontWeight.Normal)
-                    }
-
-                    val row4Keys = listOf(
-                        "Z" to Pair(0x2C, false), "X" to Pair(0x2D, false), "C" to Pair(0x2E, false), "V" to Pair(0x2F, false),
-                        "B" to Pair(0x30, false), "N" to Pair(0x31, false), "M" to Pair(0x32, false), "," to Pair(0x33, false),
-                        "." to Pair(0x34, false), "/" to Pair(0x35, false), "▲" to Pair(0x48, true), "PGDN" to Pair(0x51, true)
-                    )
-                    for ((label, scancodePair) in row4Keys) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
+                        // Shift Toggle
+                        KeyboardModifierButton(
+                            label = "Shift",
+                            isPressed = isShiftPressed,
+                            onClick = {
+                                isShiftPressed = !isShiftPressed
+                                RdpClient.sendScancodeEvent(0x2A, false, if (isShiftPressed) 1 else 0)
+                            },
                             keyHeight = keyHeight,
                             keyPadding = keyPadding,
-                            fontSize = fontSize,
-                            minWidth = if (label == "PGDN") 64.dp else 42.dp
+                            fontSize = if (isFitScreen) fitKeyFontSize("Shift") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 64.dp,
+                            modifier = if (isFitScreen) Modifier.weight(1.8f) else Modifier
                         )
-                    }
-                }
 
-                // Row 5: Modifiers, Space, Arrows, F1-F12
-                Row(
-                    modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    // Ctrl
-                    Button(
-                        onClick = {
-                            isCtrlPressed = !isCtrlPressed
-                            RdpClient.sendScancodeEvent(0x1D, false, if (isCtrlPressed) 1 else 0)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isCtrlPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)),
-                        contentPadding = keyPadding,
-                        modifier = Modifier.height(keyHeight).widthIn(min = 54.dp),
-                        shape = RoundedCornerShape(4.dp)
+                        val row4Keys = listOf(
+                            "Z" to Pair(0x2C, false), "X" to Pair(0x2D, false), "C" to Pair(0x2E, false), "V" to Pair(0x2F, false),
+                            "B" to Pair(0x30, false), "N" to Pair(0x31, false), "M" to Pair(0x32, false), "," to Pair(0x33, false),
+                            "." to Pair(0x34, false), "/" to Pair(0x35, false), "▲" to Pair(0x48, true), "PGDN" to Pair(0x51, true)
+                        )
+                        for ((label, scancodePair) in row4Keys) {
+                            val weight = if (label == "PGDN") 1.4f else 1f
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else fontSize,
+                                minWidth = if (isFitScreen) 0.dp else if (label == "PGDN") 64.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(weight) else Modifier
+                            )
+                        }
+                    }
+
+                    // Row 5: Modifiers, Space, Arrows, F1-F12
+                    Row(
+                        modifier = fullKeyRowModifier(),
+                        horizontalArrangement = Arrangement.spacedBy(keySpacing),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("Ctrl", fontSize = fontSize, color = if (isCtrlPressed) Color.Black else Color.White, fontWeight = if (isCtrlPressed) FontWeight.Bold else FontWeight.Normal)
-                    }
-
-                    // Win
-                    Button(
-                        onClick = {
-                            isWinPressed = !isWinPressed
-                            RdpClient.sendScancodeEvent(0x5B, true, if (isWinPressed) 1 else 0)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isWinPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)),
-                        contentPadding = keyPadding,
-                        modifier = Modifier.height(keyHeight).widthIn(min = 54.dp),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text("Win", fontSize = fontSize, color = if (isWinPressed) Color.Black else Color.White, fontWeight = if (isWinPressed) FontWeight.Bold else FontWeight.Normal)
-                    }
-
-                    // Alt
-                    Button(
-                        onClick = {
-                            isAltPressed = !isAltPressed
-                            RdpClient.sendScancodeEvent(0x38, false, if (isAltPressed) 1 else 0)
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = if (isAltPressed) MaterialTheme.colorScheme.primary else Color(0xFF334155)),
-                        contentPadding = keyPadding,
-                        modifier = Modifier.height(keyHeight).widthIn(min = 54.dp),
-                        shape = RoundedCornerShape(4.dp)
-                    ) {
-                        Text("Alt", fontSize = fontSize, color = if (isAltPressed) Color.Black else Color.White, fontWeight = if (isAltPressed) FontWeight.Bold else FontWeight.Normal)
-                    }
-
-                    // Space
-                    KeyboardButton(
-                        label = "SPACE",
-                        scancodePair = Pair(0x39, false),
-                        keyHeight = keyHeight,
-                        keyPadding = keyPadding,
-                        fontSize = fontSize,
-                        minWidth = 160.dp
-                    )
-
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // Left, Down, Right Arrows
-                    val arrows = listOf("◀" to Pair(0x4B, true), "▼" to Pair(0x50, true), "▶" to Pair(0x4D, true))
-                    for ((label, scancodePair) in arrows) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
+                        // Ctrl
+                        KeyboardModifierButton(
+                            label = "Ctrl",
+                            isPressed = isCtrlPressed,
+                            onClick = {
+                                isCtrlPressed = !isCtrlPressed
+                                RdpClient.sendScancodeEvent(0x1D, false, if (isCtrlPressed) 1 else 0)
+                            },
                             keyHeight = keyHeight,
                             keyPadding = keyPadding,
-                            fontSize = 16.sp,
-                            minWidth = 42.dp
+                            fontSize = if (isFitScreen) fitKeyFontSize("Ctrl") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 54.dp,
+                            modifier = if (isFitScreen) Modifier.weight(1.1f) else Modifier
                         )
-                    }
 
-                    Spacer(modifier = Modifier.width(4.dp))
-
-                    // F1-F12
-                    val fKeys = listOf(
-                        "F1" to Pair(0x3B, false), "F2" to Pair(0x3C, false), "F3" to Pair(0x3D, false), "F4" to Pair(0x3E, false),
-                        "F5" to Pair(0x3F, false), "F6" to Pair(0x40, false), "F7" to Pair(0x41, false), "F8" to Pair(0x42, false),
-                        "F9" to Pair(0x43, false), "F10" to Pair(0x44, false), "F11" to Pair(0x57, false), "F12" to Pair(0x58, false)
-                    )
-                    for ((label, scancodePair) in fKeys) {
-                        KeyboardButton(
-                            label = label,
-                            scancodePair = scancodePair,
+                        // Win
+                        KeyboardModifierButton(
+                            label = "Win",
+                            isPressed = isWinPressed,
+                            onClick = {
+                                isWinPressed = !isWinPressed
+                                RdpClient.sendScancodeEvent(0x5B, true, if (isWinPressed) 1 else 0)
+                            },
                             keyHeight = keyHeight,
                             keyPadding = keyPadding,
-                            fontSize = fontSize,
-                            minWidth = 42.dp
+                            fontSize = if (isFitScreen) fitKeyFontSize("Win") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 54.dp,
+                            modifier = if (isFitScreen) Modifier.weight(1.1f) else Modifier
                         )
+
+                        // Alt
+                        KeyboardModifierButton(
+                            label = "Alt",
+                            isPressed = isAltPressed,
+                            onClick = {
+                                isAltPressed = !isAltPressed
+                                RdpClient.sendScancodeEvent(0x38, false, if (isAltPressed) 1 else 0)
+                            },
+                            keyHeight = keyHeight,
+                            keyPadding = keyPadding,
+                            fontSize = if (isFitScreen) fitKeyFontSize("Alt") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 54.dp,
+                            modifier = if (isFitScreen) Modifier.weight(1.1f) else Modifier
+                        )
+
+                        // Space
+                        KeyboardButton(
+                            label = "SPACE",
+                            scancodePair = Pair(0x39, false),
+                            keyHeight = keyHeight,
+                            keyPadding = keyPadding,
+                            fontSize = if (isFitScreen) fitKeyFontSize("SPACE") else fontSize,
+                            minWidth = if (isFitScreen) 0.dp else 160.dp,
+                            modifier = if (isFitScreen) Modifier.weight(2.5f) else Modifier
+                        )
+
+                        if (!isFitScreen) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+
+                        // Left, Down, Right Arrows
+                        val arrows = listOf("◀" to Pair(0x4B, true), "▼" to Pair(0x50, true), "▶" to Pair(0x4D, true))
+                        for ((label, scancodePair) in arrows) {
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else 16.sp,
+                                minWidth = if (isFitScreen) 0.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(1f) else Modifier
+                            )
+                        }
+
+                        if (!isFitScreen) {
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+
+                        // F1-F12
+                        val fKeys = listOf(
+                            "F1" to Pair(0x3B, false), "F2" to Pair(0x3C, false), "F3" to Pair(0x3D, false), "F4" to Pair(0x3E, false),
+                            "F5" to Pair(0x3F, false), "F6" to Pair(0x40, false), "F7" to Pair(0x41, false), "F8" to Pair(0x42, false),
+                            "F9" to Pair(0x43, false), "F10" to Pair(0x44, false), "F11" to Pair(0x57, false), "F12" to Pair(0x58, false)
+                        )
+                        for ((label, scancodePair) in fKeys) {
+                            KeyboardButton(
+                                label = label,
+                                scancodePair = scancodePair,
+                                keyHeight = keyHeight,
+                                keyPadding = keyPadding,
+                                fontSize = if (isFitScreen) fitKeyFontSize(label) else fontSize,
+                                minWidth = if (isFitScreen) 0.dp else 42.dp,
+                                modifier = if (isFitScreen) Modifier.weight(1f) else Modifier
+                            )
+                        }
                     }
                 }
             }
