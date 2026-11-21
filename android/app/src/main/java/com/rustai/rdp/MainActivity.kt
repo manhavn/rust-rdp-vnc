@@ -1321,11 +1321,11 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var isRealtimeKeyboardActive by remember { mutableStateOf(false) }
     var showFullKeyboard by remember { mutableStateOf(false) }
     var fullKeyboardMode by remember {
-        val savedMode = sharedPrefs.getString("fullKeyboardMode", FullKeyboardMode.ROW_SCROLL.name)
+        val savedMode = sharedPrefs.getString("fullKeyboardMode", FullKeyboardMode.ALL_SCROLL.name)
         val initialMode = try {
-            FullKeyboardMode.valueOf(savedMode ?: FullKeyboardMode.ROW_SCROLL.name)
+            FullKeyboardMode.valueOf(savedMode ?: FullKeyboardMode.ALL_SCROLL.name)
         } catch (e: Exception) {
-            FullKeyboardMode.ROW_SCROLL
+            FullKeyboardMode.ALL_SCROLL
         }
         mutableStateOf(initialMode)
     }
@@ -2178,6 +2178,36 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                 val fontSize = 13.sp
                 val allScrollState = rememberScrollState()
 
+                // US-layout shifted characters, so the key labels show what the
+                // remote side will actually receive while Shift is active.
+                fun shiftedKeyLabel(label: String): String = when (label) {
+                    "`" -> "~"
+                    "1" -> "!"
+                    "2" -> "@"
+                    "3" -> "#"
+                    "4" -> "$"
+                    "5" -> "%"
+                    "6" -> "^"
+                    "7" -> "&"
+                    "8" -> "*"
+                    "9" -> "("
+                    "0" -> ")"
+                    "-" -> "_"
+                    "=" -> "+"
+                    "[" -> "{"
+                    "]" -> "}"
+                    "\\" -> "|"
+                    ";" -> ":"
+                    "'" -> "\""
+                    "," -> "<"
+                    "." -> ">"
+                    "/" -> "?"
+                    else -> label
+                }
+
+                fun keyLabel(label: String): String =
+                    if (isShiftPressed) shiftedKeyLabel(label) else label
+
                 fun fitKeyFontSize(label: String): androidx.compose.ui.unit.TextUnit {
                     return when {
                         label.length >= 7 -> if (isPortrait) 6.sp else 8.sp
@@ -2296,7 +2326,7 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                                 else -> 1f
                             }
                             KeyboardButton(
-                                label = label,
+                                label = keyLabel(label),
                                 scancodePair = scancodePair,
                                 keyHeight = keyHeight,
                                 keyPadding = keyPadding,
@@ -2326,7 +2356,7 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                                 else -> 1f
                             }
                             KeyboardButton(
-                                label = label,
+                                label = keyLabel(label),
                                 scancodePair = scancodePair,
                                 keyHeight = keyHeight,
                                 keyPadding = keyPadding,
@@ -2375,7 +2405,7 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                                 else -> 1f
                             }
                             KeyboardButton(
-                                label = label,
+                                label = keyLabel(label),
                                 scancodePair = scancodePair,
                                 keyHeight = keyHeight,
                                 keyPadding = keyPadding,
@@ -2415,7 +2445,7 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                         for ((label, scancodePair) in row4Keys) {
                             val weight = if (label == "PGDN") 1.4f else 1f
                             KeyboardButton(
-                                label = label,
+                                label = keyLabel(label),
                                 scancodePair = scancodePair,
                                 keyHeight = keyHeight,
                                 keyPadding = keyPadding,
