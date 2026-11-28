@@ -42,9 +42,15 @@ object RdpClient {
         height: Int,
         connectionMode: String,
         callback: Callback
-    )
+    ): Long
 
-    // Disconnect from RDP Server
+    // Disconnect one tab without affecting the other remote sessions.
+    @JvmStatic external fun disconnectSession(sessionId: Long)
+
+    // Route mouse and keyboard input to the currently selected tab.
+    @JvmStatic external fun setActiveSession(sessionId: Long)
+
+    // Disconnect all sessions when the application is actually closed.
     @JvmStatic external fun disconnect()
 
     // Send mouse input events

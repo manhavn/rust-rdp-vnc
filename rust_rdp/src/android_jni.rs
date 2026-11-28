@@ -1,12 +1,12 @@
 use jni::objects::{GlobalRef, JClass, JObject, JString};
-use jni::sys::{jboolean, jint};
+use jni::sys::{jboolean, jint, jlong};
 use jni::JNIEnv;
 use std::sync::Arc;
 
 use crate::{
-    connect_session, disconnect_session, init_runtime, send_key_event, send_mouse_event,
-    send_mouse_horizontal_wheel_event, send_mouse_wheel_event, send_scancode_event,
-    SessionCallback,
+    connect_session, disconnect_session, disconnect_session_id, init_runtime, send_key_event,
+    send_mouse_event, send_mouse_horizontal_wheel_event, send_mouse_wheel_event,
+    send_scancode_event, set_active_session, SessionCallback,
 };
 
 struct JniCallback {
@@ -130,7 +130,7 @@ pub extern "system" fn Java_com_rustai_rdp_RdpClient_connect(
     height: jint,
     connection_mode: JString,
     callback: JObject,
-) {
+) -> jlong {
     let host_str: String = env.get_string(&host).unwrap().into();
     let user_str: String = env.get_string(&username).unwrap().into();
     let pass_str: String = env.get_string(&password).unwrap().into();
@@ -154,7 +154,25 @@ pub extern "system" fn Java_com_rustai_rdp_RdpClient_connect(
         height,
         conn_mode_str,
         cb,
-    );
+    ) as jlong
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rustai_rdp_RdpClient_disconnectSession(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+) {
+    disconnect_session_id(session_id as u64);
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_rustai_rdp_RdpClient_setActiveSession(
+    _env: JNIEnv,
+    _class: JClass,
+    session_id: jlong,
+) {
+    set_active_session(session_id as u64);
 }
 
 #[no_mangle]

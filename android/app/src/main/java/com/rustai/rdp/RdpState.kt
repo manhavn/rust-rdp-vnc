@@ -1,13 +1,18 @@
 package com.rustai.rdp
 
 import android.graphics.Bitmap
+import android.content.Context
+import android.content.SharedPreferences
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import androidx.lifecycle.ViewModel
 
 enum class ConnectionState {
     IDLE,
@@ -28,6 +33,10 @@ class RdpViewModel : RdpClient.Callback {
 
     // Trigger state to let Compose know we have a new frame
     var frameTrigger by mutableStateOf(0)
+
+    // Native Rust session id. Each Android tab owns an independent backend session.
+    var sessionId by mutableStateOf(0L)
+    var connectionGeneration by mutableStateOf(0L)
 
     // Connection parameters as mutable state
     var host by mutableStateOf("")
@@ -125,6 +134,9 @@ class RdpViewModel : RdpClient.Callback {
             else -> ConnectionState.IDLE
         }
         statusMessage = message
+        if (state == 0) {
+            sessionId = 0L
+        }
     }
 
     override fun onFrameDecoded(pixels: IntArray, x: Int, y: Int, width: Int, height: Int) {
@@ -169,4 +181,289 @@ class RdpViewModel : RdpClient.Callback {
             Log.e("RdpViewModel", "Error creating cursor bitmap: ${e.message}")
         }
     }
+}
+
+
+data class RdpWorkspaceTab(
+    val id: Long,
+    val viewModel: RdpViewModel
+)
+
+data class SavedConnectionProfile(
+    val id: Long = 0L,
+    val name: String = "",
+    val host: String = "",
+    val port: String = "3389",
+    val username: String = "",
+    val password: String = "",
+    val domain: String = "",
+    val connectionMode: String = "RDP",
+    val selectedResolution: String = "1920x1080 (FHD)",
+    val customWidth: String = "1920",
+    val customHeight: String = "1080"
+)
+
+/**
+ * Holds the Android multi-tab workspace across Activity configuration changes.
+ * Like the desktop client, it restores connection forms and the selected tab,
+ * but it does not automatically reconnect remote sessions after process restart.
+ */
+class RdpWorkspaceViewModel : ViewModel() {
+    val tabs = mutableStateListOf<RdpWorkspaceTab>()
+    val savedConnections = mutableStateListOf<SavedConnectionProfile>()
+    var activeTabIndex by mutableIntStateOf(0)
+        private set
+
+    private var nextTabId = 1L
+    private var nextProfileId = 1L
+    private var initialized = false
+
+    fun initialize(context: Context) {
+        if (initialized) return
+
+        val prefs = context.applicationContext.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
+        val savedCount = prefs.getInt("workspace_tab_count", 0).coerceIn(0, 64)
+
+        if (savedCount > 0) {
+            repeat(savedCount) { index ->
+                val vm = RdpViewModel()
+                vm.restoreFromPreferences(prefs, "workspace_tab_${index}_")
+                tabs.add(RdpWorkspaceTab(nextTabId++, vm))
+            }
+            activeTabIndex = prefs.getInt("workspace_active_tab", 0)
+                .coerceIn(0, tabs.lastIndex)
+        } else {
+            // Migrate the single connection form saved by older Android versions.
+            val vm = RdpViewModel()
+            vm.restoreFromPreferences(prefs, "", useLegacyKeys = true)
+            tabs.add(RdpWorkspaceTab(nextTabId++, vm))
+            activeTabIndex = 0
+        }
+
+        if (tabs.isEmpty()) {
+            tabs.add(RdpWorkspaceTab(nextTabId++, RdpViewModel()))
+            activeTabIndex = 0
+        }
+
+        val savedProfileCount = prefs.getInt("saved_connection_count", 0).coerceIn(0, 128)
+        repeat(savedProfileCount) { index ->
+            val prefix = "saved_connection_${index}_"
+            val profile = SavedConnectionProfile(
+                id = prefs.getLong(prefix + "id", index.toLong() + 1L),
+                name = prefs.getString(prefix + "name", "") ?: "",
+                host = prefs.getString(prefix + "host", "") ?: "",
+                port = prefs.getString(prefix + "port", "3389") ?: "3389",
+                username = prefs.getString(prefix + "username", "") ?: "",
+                password = prefs.getString(prefix + "password", "") ?: "",
+                domain = prefs.getString(prefix + "domain", "") ?: "",
+                connectionMode = prefs.getString(prefix + "connectionMode", "RDP") ?: "RDP",
+                selectedResolution = prefs.getString(prefix + "resolution", "1920x1080 (FHD)") ?: "1920x1080 (FHD)",
+                customWidth = prefs.getString(prefix + "customWidth", "1920") ?: "1920",
+                customHeight = prefs.getString(prefix + "customHeight", "1080") ?: "1080"
+            )
+            if (profile.host.isNotBlank()) savedConnections.add(profile)
+        }
+        nextProfileId = (savedConnections.maxOfOrNull { it.id } ?: 0L) + 1L
+
+        initialized = true
+        activateCurrentTab()
+    }
+
+    fun activeViewModel(): RdpViewModel? = tabs.getOrNull(activeTabIndex)?.viewModel
+
+    fun addTab(context: Context) {
+        tabs.add(RdpWorkspaceTab(nextTabId++, RdpViewModel()))
+        activeTabIndex = tabs.lastIndex
+        activateCurrentTab()
+        save(context)
+    }
+
+    fun selectTab(context: Context, index: Int) {
+        if (index !in tabs.indices || index == activeTabIndex) return
+        releaseActiveInput()
+        activeTabIndex = index
+        activateCurrentTab()
+        save(context)
+    }
+
+    fun moveTab(context: Context, fromIndex: Int, toIndex: Int) {
+        if (fromIndex !in tabs.indices || toIndex !in tabs.indices || fromIndex == toIndex) return
+        val activeId = tabs.getOrNull(activeTabIndex)?.id
+        val moved = tabs.removeAt(fromIndex)
+        tabs.add(toIndex, moved)
+        activeTabIndex = tabs.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
+        activateCurrentTab()
+        save(context)
+    }
+
+    fun saveProfile(context: Context, profile: SavedConnectionProfile) {
+        if (profile.host.isBlank()) return
+        val existingIndex = if (profile.id != 0L) {
+            savedConnections.indexOfFirst { it.id == profile.id }
+        } else {
+            savedConnections.indexOfFirst {
+                it.host.equals(profile.host, ignoreCase = true) &&
+                    it.port == profile.port && it.connectionMode == profile.connectionMode
+            }
+        }
+        val finalProfile = profile.copy(
+            id = if (existingIndex >= 0) savedConnections[existingIndex].id else nextProfileId++,
+            name = profile.name.ifBlank { profile.host }
+        )
+        if (existingIndex >= 0) {
+            savedConnections[existingIndex] = finalProfile
+        } else {
+            savedConnections.add(finalProfile)
+        }
+        persistSavedConnections(context)
+    }
+
+    fun deleteSavedConnection(context: Context, profileId: Long) {
+        savedConnections.removeAll { it.id == profileId }
+        persistSavedConnections(context)
+    }
+
+    private fun persistSavedConnections(context: Context) {
+        val prefs = context.applicationContext.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
+        val editor = prefs.edit().putInt("saved_connection_count", savedConnections.size)
+        savedConnections.forEachIndexed { index, profile ->
+            val prefix = "saved_connection_${index}_"
+            editor.putLong(prefix + "id", profile.id)
+                .putString(prefix + "name", profile.name)
+                .putString(prefix + "host", profile.host)
+                .putString(prefix + "port", profile.port)
+                .putString(prefix + "username", profile.username)
+                .putString(prefix + "password", profile.password)
+                .putString(prefix + "domain", profile.domain)
+                .putString(prefix + "connectionMode", profile.connectionMode)
+                .putString(prefix + "resolution", profile.selectedResolution)
+                .putString(prefix + "customWidth", profile.customWidth)
+                .putString(prefix + "customHeight", profile.customHeight)
+        }
+        editor.apply()
+    }
+
+    fun closeTab(context: Context, index: Int) {
+        if (index !in tabs.indices) return
+
+        val closingActive = index == activeTabIndex
+        val closingViewModel = tabs[index].viewModel
+        closingViewModel.connectionGeneration += 1L
+        if (closingActive) releaseActiveInput()
+        if (closingViewModel.sessionId != 0L) {
+            if (RdpClient.loadError == null) {
+                RdpClient.disconnectSession(closingViewModel.sessionId)
+            }
+            closingViewModel.sessionId = 0L
+        }
+
+        tabs.removeAt(index)
+        if (tabs.isEmpty()) {
+            tabs.add(RdpWorkspaceTab(nextTabId++, RdpViewModel()))
+            activeTabIndex = 0
+        } else if (index < activeTabIndex) {
+            activeTabIndex -= 1
+        } else if (activeTabIndex >= tabs.size) {
+            activeTabIndex = tabs.lastIndex
+        }
+
+        activateCurrentTab()
+        save(context)
+    }
+
+    fun save(context: Context) {
+        if (tabs.isEmpty()) return
+        val prefs = context.applicationContext.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
+        val editor = prefs.edit()
+            .putInt("workspace_tab_count", tabs.size)
+            .putInt("workspace_active_tab", activeTabIndex.coerceIn(0, tabs.lastIndex))
+
+        tabs.forEachIndexed { index, tab ->
+            tab.viewModel.saveToPreferences(editor, "workspace_tab_${index}_")
+        }
+
+        // Keep the last active connection in the legacy keys for compatibility
+        // with external intents and older builds that still read these values.
+        activeViewModel()?.saveToPreferences(editor, "")
+        editor.apply()
+    }
+
+    private fun activateCurrentTab() {
+        if (RdpClient.loadError == null) {
+            RdpClient.setActiveSession(activeViewModel()?.sessionId ?: 0L)
+        }
+    }
+
+    private fun releaseActiveInput() {
+        val sessionId = activeViewModel()?.sessionId ?: return
+        if (sessionId == 0L) return
+
+        if (RdpClient.loadError != null) return
+        RdpClient.setActiveSession(sessionId)
+        // Release common held inputs before switching the native active session.
+        RdpClient.sendMouseEvent(0, 0, 2)
+        RdpClient.sendScancodeEvent(0x1D, false, 0) // Ctrl
+        RdpClient.sendScancodeEvent(0x38, false, 0) // Alt
+        RdpClient.sendScancodeEvent(0x2A, false, 0) // Shift
+        RdpClient.sendScancodeEvent(0x5B, true, 0)  // Meta / Windows
+    }
+}
+
+fun RdpViewModel.toSavedConnectionProfile(name: String = host): SavedConnectionProfile =
+    SavedConnectionProfile(
+        name = name.ifBlank { host },
+        host = host,
+        port = port,
+        username = username,
+        password = password,
+        domain = domain,
+        connectionMode = connectionMode,
+        selectedResolution = selectedResolution,
+        customWidth = customWidth,
+        customHeight = customHeight
+    )
+
+fun RdpViewModel.applySavedConnection(profile: SavedConnectionProfile) {
+    host = profile.host
+    port = profile.port
+    username = profile.username
+    password = profile.password
+    domain = profile.domain
+    connectionMode = profile.connectionMode
+    selectedResolution = profile.selectedResolution
+    customWidth = profile.customWidth
+    customHeight = profile.customHeight
+}
+
+fun RdpViewModel.restoreFromPreferences(
+    prefs: SharedPreferences,
+    prefix: String,
+    useLegacyKeys: Boolean = false
+) {
+    fun savedString(key: String, defaultValue: String): String {
+        val fallback = if (useLegacyKeys) prefs.getString(key, defaultValue) ?: defaultValue else defaultValue
+        return prefs.getString(prefix + key, fallback) ?: fallback
+    }
+
+    host = savedString("host", "")
+    port = savedString("port", "3389")
+    username = savedString("username", "")
+    password = savedString("password", "")
+    domain = savedString("domain", "")
+    connectionMode = savedString("connectionMode", "RDP")
+    customWidth = savedString("customWidth", "1920")
+    customHeight = savedString("customHeight", "1080")
+    setResolution(savedString("resolution", "1920x1080 (FHD)"))
+}
+
+fun RdpViewModel.saveToPreferences(editor: SharedPreferences.Editor, prefix: String) {
+    editor.putString(prefix + "host", host)
+        .putString(prefix + "port", port)
+        .putString(prefix + "username", username)
+        .putString(prefix + "password", password)
+        .putString(prefix + "domain", domain)
+        .putString(prefix + "connectionMode", connectionMode)
+        .putString(prefix + "resolution", selectedResolution)
+        .putString(prefix + "customWidth", customWidth)
+        .putString(prefix + "customHeight", customHeight)
 }

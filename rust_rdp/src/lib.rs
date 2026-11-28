@@ -87,7 +87,7 @@ struct RdpSession {
 
 lazy_static! {
     static ref RUNTIME: Mutex<Option<tokio::runtime::Runtime>> = Mutex::new(None);
-    /// Concurrent remote sessions (desktop multi-tab). Android typically uses one.
+    /// Concurrent remote sessions shared by desktop and Android multi-tab clients.
     static ref SESSIONS: Mutex<HashMap<u64, Arc<Mutex<RdpSession>>>> = Mutex::new(HashMap::new());
 }
 

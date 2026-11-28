@@ -20,7 +20,7 @@ Protocols: **Microsoft RDP** (via [IronRDP](https://github.com/Devolutions/IronR
 - Shared Rust backend for connection, decoding, mouse, and keyboard
 - Connection files (`.rdp` / `.vnc`) open/save across clients
 - iOS: SwiftUI responsive interface, touch gestures, trackpad mode, soft keyboard, Ctrl+Alt+Del shortcut
-- Android: touch gestures, soft keyboard helpers, fullscreen remote view
+- Android: touch gestures, concurrent RDP/VNC tabs, a saved-connections sidebar, draggable tab ordering, Bluetooth/USB keyboard and mouse input, and adaptive tablet workspace
 - Desktop Linux: menu bar, toolbar, connection panel, zoom, fullscreen, native file dialogs
 
 ---
@@ -93,6 +93,17 @@ To build the iOS `.app` or deploy to a device on macOS, open the Xcode project:
 ```bash
 open ios/RustRdpVnc.xcodeproj
 ```
+
+---
+
+## Android — tablet workspace and peripherals
+
+- Each tab owns an independent RDP/VNC session. Create, switch, close, and drag tabs to reorder them; the order and active tab are persisted.
+- The **Connections** sidebar manages saved profiles independently from open tabs: search, add, edit, delete, and connect. Connecting a profile opens a new tab when the current tab is already connected.
+- Tabs and connection forms are restored after app restart. Network sessions do not automatically reconnect after the Android process is stopped; reconnect manually.
+- Bluetooth/USB keyboards forward PC scan codes for letters, numbers, function/navigation keys, and modifiers. Common shortcuts such as Ctrl+C/Ctrl+V/Ctrl+Alt+Del are forwarded when Android does not reserve them for the system.
+- Bluetooth/USB mice support pointer movement, left/right/middle click, back/forward buttons, and vertical/horizontal wheel scrolling. Android handles pairing and HID input routing; no Bluetooth permission is required.
+- Saved passwords use the app-private `SharedPreferences` mechanism already used for connection forms; they are not additionally encrypted with Android Keystore yet.
 
 ---
 

@@ -20,7 +20,7 @@ Giao thức: **Microsoft RDP** (qua [IronRDP](https://github.com/Devolutions/Iro
 - Backend Rust dùng chung: kết nối, giải mã hình, chuột, bàn phím
 - File kết nối (`.rdp` / `.vnc`) mở/lưu trên các nền tảng
 - iOS: Giao diện SwiftUI hiện đại, cử chỉ chạm, trackpad ảo, bàn phím ảo, phím tắt Ctrl+Alt+Del
-- Android: cử chỉ chạm, bàn phím ảo, xem remote fullscreen
+- Android: tablet workspace với sidebar kết nối đã lưu, tab kéo-thả sắp xếp, nhiều phiên RDP/VNC, bàn phím/chuột Bluetooth hoặc USB và khôi phục workspace.
 - Desktop Linux: menu, thanh công cụ, panel kết nối, zoom, fullscreen, hộp thoại file native
 
 ---
@@ -95,6 +95,16 @@ open ios/RustRdpVnc.xcodeproj
 ```
 
 ---
+
+## Android — tablet workspace, nhiều tab và thiết bị ngoại vi
+
+- Mỗi tab giữ một phiên RDP/VNC riêng; có thể tạo, chuyển, đóng và kéo thả tab để đổi thứ tự như trên Desktop. Thứ tự tab và tab đang chọn được lưu lại.
+- Sidebar **Connections** quản lý các cấu hình đã lưu độc lập với tab đang mở: tìm kiếm, thêm, sửa, xóa và kết nối nhanh. Nếu tab hiện tại đang kết nối, profile sẽ mở trong tab mới.
+- Tab và cấu hình kết nối được khôi phục sau khi mở ứng dụng lại. Các phiên mạng không tự reconnect sau khi tiến trình Android bị dừng; người dùng chủ động kết nối lại.
+- Bàn phím Bluetooth/USB gửi scan code PC cho các phím chữ, số, chức năng, điều hướng và modifier; các tổ hợp như Ctrl+C/Ctrl+V/Ctrl+Alt+Del được chuyển tiếp khi Android không giữ phím tắt đó cho hệ thống.
+- Chuột Bluetooth/USB hỗ trợ di chuyển con trỏ, nhấn trái/phải/giữa, nút back/forward và con lăn dọc/ngang. Không cần quyền Bluetooth riêng vì Android quản lý thiết bị HID đã ghép đôi.
+- Từ 600dp chiều rộng cửa sổ, sidebar và thanh tab hiển thị theo bố cục tablet; cửa sổ hẹp tiếp tục dùng giao diện tab gọn.
+- Lưu ý: thông tin mật khẩu hiện dùng cùng cơ chế `SharedPreferences` riêng của ứng dụng như cấu hình kết nối hiện có; chưa được mã hóa bổ sung bằng Android Keystore.
 
 ## Build — Android
 

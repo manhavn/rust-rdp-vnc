@@ -122,7 +122,7 @@ if ! command -v cargo-ndk &> /dev/null; then
     echo -e "${YELLOW}[!] cargo-ndk not found. Installing cargo-ndk...${NC}"
     cargo install cargo-ndk --locked
 fi
-echo -e "${GREEN}  ✓ cargo-ndk:${NC} $(cargo-ndk --version)"
+echo -e "${GREEN}  ✓ cargo-ndk:${NC} $(cargo ndk --version)"
 
 # 4. Ensure Android SDK, cmdline-tools, platform/build-tools, and NDK
 if [ -z "$ANDROID_HOME" ] || [ ! -d "$ANDROID_HOME" ]; then

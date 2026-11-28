@@ -1,7 +1,11 @@
 package com.rustai.rdp
 
 import android.os.Bundle
+import android.view.InputDevice
+import android.view.MotionEvent
+import android.view.KeyEvent as AndroidKeyEvent
 import androidx.activity.ComponentActivity
+import androidx.lifecycle.ViewModelProvider
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.BorderStroke
@@ -14,6 +18,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroidSize
@@ -38,14 +43,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalConfiguration
 import android.content.res.Configuration
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.foundation.focusable
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.*
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.TextRange
 import androidx.compose.material.icons.filled.Add
@@ -72,6 +80,7 @@ import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.input.pointer.positionChanged
 import androidx.compose.ui.text.font.FontWeight
@@ -82,6 +91,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -94,6 +104,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 import android.content.Context
 import android.content.Intent
@@ -119,9 +130,10 @@ enum class FullKeyboardMode {
 }
 
 class MainActivity : ComponentActivity() {
-    private val viewModel = RdpViewModel()
+    private lateinit var workspace: RdpWorkspaceViewModel
 
     private fun triggerConnection(
+        targetViewModel: RdpViewModel,
         host: String,
         port: String,
         username: String,
@@ -129,16 +141,22 @@ class MainActivity : ComponentActivity() {
         domain: String,
         connectionMode: String
     ) {
-        val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(resources.displayMetrics)
+        val (targetWidth, targetHeight) = targetViewModel.calculateTargetResolution(resources.displayMetrics)
 
-        viewModel.onStateChanged(1, "Negotiating $connectionMode Connection...")
-        viewModel.initBitmap(targetWidth, targetHeight)
-        
+        if (targetViewModel.sessionId != 0L && RdpClient.loadError == null) {
+            RdpClient.disconnectSession(targetViewModel.sessionId)
+        }
+        targetViewModel.sessionId = 0L
+        targetViewModel.connectionGeneration += 1L
+        val attemptGeneration = targetViewModel.connectionGeneration
+        targetViewModel.onStateChanged(1, "Negotiating $connectionMode Connection...")
+        targetViewModel.initBitmap(targetWidth, targetHeight)
+
         val defaultPort = if (connectionMode == "VNC") 5900 else 3389
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                RdpClient.connect(
+                val sessionId = RdpClient.connect(
                     host,
                     port.toIntOrNull() ?: defaultPort,
                     username,
@@ -147,15 +165,34 @@ class MainActivity : ComponentActivity() {
                     targetWidth,
                     targetHeight,
                     connectionMode,
-                    viewModel
+                    targetViewModel
                 )
+                withContext(Dispatchers.Main) {
+                    if (targetViewModel.connectionGeneration != attemptGeneration ||
+                        workspace.tabs.none { it.viewModel === targetViewModel }
+                    ) {
+                        RdpClient.disconnectSession(sessionId)
+                        if (targetViewModel.connectionGeneration == attemptGeneration) {
+                            targetViewModel.sessionId = 0L
+                            targetViewModel.onStateChanged(0, "Cancelled")
+                        }
+                    } else {
+                        targetViewModel.sessionId = sessionId
+                    }
+                    RdpClient.setActiveSession(workspace.activeViewModel()?.sessionId ?: 0L)
+                    workspace.save(this@MainActivity)
+                }
             } catch (e: Exception) {
-                CoroutineScope(Dispatchers.Main).launch {
-                    viewModel.onStateChanged(3, "Failed: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    if (targetViewModel.connectionGeneration == attemptGeneration) {
+                        targetViewModel.onStateChanged(3, "Failed: ${e.message}")
+                    }
                 }
             } catch (e: LinkageError) {
-                CoroutineScope(Dispatchers.Main).launch {
-                    viewModel.onStateChanged(3, "LinkageError: ${e.message}")
+                withContext(Dispatchers.Main) {
+                    if (targetViewModel.connectionGeneration == attemptGeneration) {
+                        targetViewModel.onStateChanged(3, "LinkageError: ${e.message}")
+                    }
                 }
             }
         }
@@ -173,52 +210,36 @@ class MainActivity : ComponentActivity() {
             val widthVal = it.getStringExtra("width") ?: it.getStringExtra("desktopwidth")
             val heightVal = it.getStringExtra("height") ?: it.getStringExtra("desktopheight")
             val autoconnectVal = it.getBooleanExtra("autoconnect", false) || it.getStringExtra("autoconnect") == "true"
-            
+
             if (!hostVal.isNullOrEmpty()) {
-                val sharedPrefs = getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
-                sharedPrefs.edit().apply {
-                    putString("host", hostVal)
-                    if (portVal != null) putString("port", portVal)
-                    if (usernameVal != null) putString("username", usernameVal)
-                    if (passwordVal != null) putString("password", passwordVal)
-                    if (domainVal != null) putString("domain", domainVal)
-                    if (widthVal != null) putString("customWidth", widthVal)
-                    if (heightVal != null) putString("customHeight", heightVal)
-                    if (resolutionVal != null) {
-                        viewModel.setResolution(resolutionVal)
-                        putString("resolution", viewModel.selectedResolution)
-                    } else if (widthVal != null && heightVal != null) {
-                        viewModel.customWidth = widthVal
-                        viewModel.customHeight = heightVal
-                        viewModel.selectedResolution = "Custom"
-                        putString("resolution", "Custom")
-                    }
-                    putString("connectionMode", connModeVal)
-                    apply()
+                var targetViewModel = workspace.activeViewModel() ?: return
+                if (targetViewModel.connectionState == ConnectionState.CONNECTED ||
+                    targetViewModel.connectionState == ConnectionState.CONNECTING
+                ) {
+                    workspace.addTab(this)
+                    targetViewModel = workspace.activeViewModel() ?: return
                 }
-                
-                // Update ViewModel states directly so UI updates instantly!
-                viewModel.host = hostVal
-                if (portVal != null) viewModel.port = portVal
-                if (usernameVal != null) viewModel.username = usernameVal
-                if (passwordVal != null) viewModel.password = passwordVal
-                if (domainVal != null) viewModel.domain = domainVal
-                if (widthVal != null) viewModel.customWidth = widthVal
-                if (heightVal != null) viewModel.customHeight = heightVal
+                targetViewModel.host = hostVal
+                if (portVal != null) targetViewModel.port = portVal
+                if (usernameVal != null) targetViewModel.username = usernameVal
+                if (passwordVal != null) targetViewModel.password = passwordVal
+                if (domainVal != null) targetViewModel.domain = domainVal
+                if (widthVal != null) targetViewModel.customWidth = widthVal
+                if (heightVal != null) targetViewModel.customHeight = heightVal
                 if (resolutionVal != null) {
-                    viewModel.setResolution(resolutionVal)
+                    targetViewModel.setResolution(resolutionVal)
                 } else if (widthVal != null && heightVal != null) {
-                    viewModel.selectedResolution = "Custom"
+                    targetViewModel.selectedResolution = "Custom"
                 }
-                viewModel.connectionMode = connModeVal
-                
+                targetViewModel.connectionMode = connModeVal
+                workspace.save(this)
 
                 if (autoconnectVal) {
                     val port = portVal ?: if (connModeVal == "VNC") "5900" else "3389"
                     val username = usernameVal ?: ""
                     val password = passwordVal ?: ""
                     val domain = domainVal ?: ""
-                    triggerConnection(hostVal, port, username, password, domain, connModeVal)
+                    triggerConnection(targetViewModel, hostVal, port, username, password, domain, connModeVal)
                 }
             }
         }
@@ -226,17 +247,20 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
+        setIntent(intent)
         handleIntent(intent)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        
+
         // Hide system status bar to make the app fullscreen
         WindowCompat.setDecorFitsSystemWindows(window, false)
         val insetsController = WindowCompat.getInsetsController(window, window.decorView)
         insetsController.hide(WindowInsetsCompat.Type.statusBars())
         insetsController.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+
+        workspace = ViewModelProvider(this)[RdpWorkspaceViewModel::class.java]
 
         // Initialize JNI Rust Logging and tokio runtime
         try {
@@ -247,24 +271,154 @@ class MainActivity : ComponentActivity() {
         } catch (e: LinkageError) {
         }
 
-        handleIntent(intent)
-        
+        workspace.initialize(this)
+
+        if (savedInstanceState == null) {
+            handleIntent(intent)
+        }
+
         setContent {
             RdpAppTheme {
                 Surface(
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    RdpAppScreen(viewModel)
+                    RdpAppScreen(workspace) { targetViewModel ->
+                        triggerConnection(
+                            targetViewModel,
+                            targetViewModel.host,
+                            targetViewModel.port,
+                            targetViewModel.username,
+                            targetViewModel.password,
+                            targetViewModel.domain,
+                            targetViewModel.connectionMode
+                        )
+                    }
                 }
             }
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        RdpClient.disconnect()
+    override fun onStop() {
+        workspace.save(this)
+        super.onStop()
     }
+
+    override fun onDestroy() {
+        if (isFinishing) {
+            RdpClient.disconnect()
+        }
+        super.onDestroy()
+    }
+}
+
+private data class RdpPhysicalKey(val scanCode: Int, val extended: Boolean = false)
+
+/** Maps Android HID key events to PC/AT set-1 scan codes understood by the Rust backend. */
+private fun mapAndroidKeyToRdp(keyCode: Int): RdpPhysicalKey? = when (keyCode) {
+    AndroidKeyEvent.KEYCODE_A -> RdpPhysicalKey(0x1E)
+    AndroidKeyEvent.KEYCODE_B -> RdpPhysicalKey(0x30)
+    AndroidKeyEvent.KEYCODE_C -> RdpPhysicalKey(0x2E)
+    AndroidKeyEvent.KEYCODE_D -> RdpPhysicalKey(0x20)
+    AndroidKeyEvent.KEYCODE_E -> RdpPhysicalKey(0x12)
+    AndroidKeyEvent.KEYCODE_F -> RdpPhysicalKey(0x21)
+    AndroidKeyEvent.KEYCODE_G -> RdpPhysicalKey(0x22)
+    AndroidKeyEvent.KEYCODE_H -> RdpPhysicalKey(0x23)
+    AndroidKeyEvent.KEYCODE_I -> RdpPhysicalKey(0x17)
+    AndroidKeyEvent.KEYCODE_J -> RdpPhysicalKey(0x24)
+    AndroidKeyEvent.KEYCODE_K -> RdpPhysicalKey(0x25)
+    AndroidKeyEvent.KEYCODE_L -> RdpPhysicalKey(0x26)
+    AndroidKeyEvent.KEYCODE_M -> RdpPhysicalKey(0x32)
+    AndroidKeyEvent.KEYCODE_N -> RdpPhysicalKey(0x31)
+    AndroidKeyEvent.KEYCODE_O -> RdpPhysicalKey(0x18)
+    AndroidKeyEvent.KEYCODE_P -> RdpPhysicalKey(0x19)
+    AndroidKeyEvent.KEYCODE_Q -> RdpPhysicalKey(0x10)
+    AndroidKeyEvent.KEYCODE_R -> RdpPhysicalKey(0x13)
+    AndroidKeyEvent.KEYCODE_S -> RdpPhysicalKey(0x1F)
+    AndroidKeyEvent.KEYCODE_T -> RdpPhysicalKey(0x14)
+    AndroidKeyEvent.KEYCODE_U -> RdpPhysicalKey(0x16)
+    AndroidKeyEvent.KEYCODE_V -> RdpPhysicalKey(0x2F)
+    AndroidKeyEvent.KEYCODE_W -> RdpPhysicalKey(0x11)
+    AndroidKeyEvent.KEYCODE_X -> RdpPhysicalKey(0x2D)
+    AndroidKeyEvent.KEYCODE_Y -> RdpPhysicalKey(0x15)
+    AndroidKeyEvent.KEYCODE_Z -> RdpPhysicalKey(0x2C)
+    AndroidKeyEvent.KEYCODE_1 -> RdpPhysicalKey(0x02)
+    AndroidKeyEvent.KEYCODE_2 -> RdpPhysicalKey(0x03)
+    AndroidKeyEvent.KEYCODE_3 -> RdpPhysicalKey(0x04)
+    AndroidKeyEvent.KEYCODE_4 -> RdpPhysicalKey(0x05)
+    AndroidKeyEvent.KEYCODE_5 -> RdpPhysicalKey(0x06)
+    AndroidKeyEvent.KEYCODE_6 -> RdpPhysicalKey(0x07)
+    AndroidKeyEvent.KEYCODE_7 -> RdpPhysicalKey(0x08)
+    AndroidKeyEvent.KEYCODE_8 -> RdpPhysicalKey(0x09)
+    AndroidKeyEvent.KEYCODE_9 -> RdpPhysicalKey(0x0A)
+    AndroidKeyEvent.KEYCODE_0 -> RdpPhysicalKey(0x0B)
+    AndroidKeyEvent.KEYCODE_GRAVE -> RdpPhysicalKey(0x29)
+    AndroidKeyEvent.KEYCODE_MINUS -> RdpPhysicalKey(0x0C)
+    AndroidKeyEvent.KEYCODE_EQUALS -> RdpPhysicalKey(0x0D)
+    AndroidKeyEvent.KEYCODE_LEFT_BRACKET -> RdpPhysicalKey(0x1A)
+    AndroidKeyEvent.KEYCODE_RIGHT_BRACKET -> RdpPhysicalKey(0x1B)
+    AndroidKeyEvent.KEYCODE_BACKSLASH -> RdpPhysicalKey(0x2B)
+    AndroidKeyEvent.KEYCODE_SEMICOLON -> RdpPhysicalKey(0x27)
+    AndroidKeyEvent.KEYCODE_APOSTROPHE -> RdpPhysicalKey(0x28)
+    AndroidKeyEvent.KEYCODE_COMMA -> RdpPhysicalKey(0x33)
+    AndroidKeyEvent.KEYCODE_PERIOD -> RdpPhysicalKey(0x34)
+    AndroidKeyEvent.KEYCODE_SLASH -> RdpPhysicalKey(0x35)
+    AndroidKeyEvent.KEYCODE_SPACE -> RdpPhysicalKey(0x39)
+    AndroidKeyEvent.KEYCODE_ENTER -> RdpPhysicalKey(0x1C)
+    AndroidKeyEvent.KEYCODE_NUMPAD_ENTER -> RdpPhysicalKey(0x1C, true)
+    AndroidKeyEvent.KEYCODE_TAB -> RdpPhysicalKey(0x0F)
+    AndroidKeyEvent.KEYCODE_DEL -> RdpPhysicalKey(0x0E)
+    AndroidKeyEvent.KEYCODE_FORWARD_DEL -> RdpPhysicalKey(0x53, true)
+    AndroidKeyEvent.KEYCODE_ESCAPE -> RdpPhysicalKey(0x01)
+    AndroidKeyEvent.KEYCODE_CAPS_LOCK -> RdpPhysicalKey(0x3A)
+    AndroidKeyEvent.KEYCODE_SCROLL_LOCK -> RdpPhysicalKey(0x46)
+    AndroidKeyEvent.KEYCODE_NUM_LOCK -> RdpPhysicalKey(0x45)
+    AndroidKeyEvent.KEYCODE_SYSRQ -> RdpPhysicalKey(0x37, true)
+    AndroidKeyEvent.KEYCODE_INSERT -> RdpPhysicalKey(0x52, true)
+    AndroidKeyEvent.KEYCODE_MOVE_HOME -> RdpPhysicalKey(0x47, true)
+    AndroidKeyEvent.KEYCODE_MOVE_END -> RdpPhysicalKey(0x4F, true)
+    AndroidKeyEvent.KEYCODE_PAGE_UP -> RdpPhysicalKey(0x49, true)
+    AndroidKeyEvent.KEYCODE_PAGE_DOWN -> RdpPhysicalKey(0x51, true)
+    AndroidKeyEvent.KEYCODE_DPAD_UP -> RdpPhysicalKey(0x48, true)
+    AndroidKeyEvent.KEYCODE_DPAD_DOWN -> RdpPhysicalKey(0x50, true)
+    AndroidKeyEvent.KEYCODE_DPAD_LEFT -> RdpPhysicalKey(0x4B, true)
+    AndroidKeyEvent.KEYCODE_DPAD_RIGHT -> RdpPhysicalKey(0x4D, true)
+    AndroidKeyEvent.KEYCODE_SHIFT_LEFT -> RdpPhysicalKey(0x2A)
+    AndroidKeyEvent.KEYCODE_SHIFT_RIGHT -> RdpPhysicalKey(0x36)
+    AndroidKeyEvent.KEYCODE_CTRL_LEFT -> RdpPhysicalKey(0x1D)
+    AndroidKeyEvent.KEYCODE_CTRL_RIGHT -> RdpPhysicalKey(0x1D, true)
+    AndroidKeyEvent.KEYCODE_ALT_LEFT -> RdpPhysicalKey(0x38)
+    AndroidKeyEvent.KEYCODE_ALT_RIGHT -> RdpPhysicalKey(0x38, true)
+    AndroidKeyEvent.KEYCODE_META_LEFT -> RdpPhysicalKey(0x5B, true)
+    AndroidKeyEvent.KEYCODE_META_RIGHT -> RdpPhysicalKey(0x5C, true)
+    AndroidKeyEvent.KEYCODE_F1 -> RdpPhysicalKey(0x3B)
+    AndroidKeyEvent.KEYCODE_F2 -> RdpPhysicalKey(0x3C)
+    AndroidKeyEvent.KEYCODE_F3 -> RdpPhysicalKey(0x3D)
+    AndroidKeyEvent.KEYCODE_F4 -> RdpPhysicalKey(0x3E)
+    AndroidKeyEvent.KEYCODE_F5 -> RdpPhysicalKey(0x3F)
+    AndroidKeyEvent.KEYCODE_F6 -> RdpPhysicalKey(0x40)
+    AndroidKeyEvent.KEYCODE_F7 -> RdpPhysicalKey(0x41)
+    AndroidKeyEvent.KEYCODE_F8 -> RdpPhysicalKey(0x42)
+    AndroidKeyEvent.KEYCODE_F9 -> RdpPhysicalKey(0x43)
+    AndroidKeyEvent.KEYCODE_F10 -> RdpPhysicalKey(0x44)
+    AndroidKeyEvent.KEYCODE_F11 -> RdpPhysicalKey(0x57)
+    AndroidKeyEvent.KEYCODE_F12 -> RdpPhysicalKey(0x58)
+    AndroidKeyEvent.KEYCODE_NUMPAD_0 -> RdpPhysicalKey(0x52)
+    AndroidKeyEvent.KEYCODE_NUMPAD_1 -> RdpPhysicalKey(0x4F)
+    AndroidKeyEvent.KEYCODE_NUMPAD_2 -> RdpPhysicalKey(0x50)
+    AndroidKeyEvent.KEYCODE_NUMPAD_3 -> RdpPhysicalKey(0x51)
+    AndroidKeyEvent.KEYCODE_NUMPAD_4 -> RdpPhysicalKey(0x4B)
+    AndroidKeyEvent.KEYCODE_NUMPAD_5 -> RdpPhysicalKey(0x4C)
+    AndroidKeyEvent.KEYCODE_NUMPAD_6 -> RdpPhysicalKey(0x4D)
+    AndroidKeyEvent.KEYCODE_NUMPAD_7 -> RdpPhysicalKey(0x47)
+    AndroidKeyEvent.KEYCODE_NUMPAD_8 -> RdpPhysicalKey(0x48)
+    AndroidKeyEvent.KEYCODE_NUMPAD_9 -> RdpPhysicalKey(0x49)
+    AndroidKeyEvent.KEYCODE_NUMPAD_DIVIDE -> RdpPhysicalKey(0x35, true)
+    AndroidKeyEvent.KEYCODE_NUMPAD_MULTIPLY -> RdpPhysicalKey(0x37)
+    AndroidKeyEvent.KEYCODE_NUMPAD_SUBTRACT -> RdpPhysicalKey(0x4A)
+    AndroidKeyEvent.KEYCODE_NUMPAD_ADD -> RdpPhysicalKey(0x4E)
+    AndroidKeyEvent.KEYCODE_NUMPAD_DOT -> RdpPhysicalKey(0x53)
+    else -> null
 }
 
 @Composable
@@ -288,30 +442,505 @@ fun RdpAppTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun RdpAppScreen(viewModel: RdpViewModel) {
-    val state = viewModel.connectionState
-    
-    when (state) {
-        ConnectionState.IDLE, ConnectionState.FAILED -> {
-            ConnectionDashboard(viewModel)
+fun RdpAppScreen(
+    workspace: RdpWorkspaceViewModel,
+    onConnect: (RdpViewModel) -> Unit
+) {
+    val context = LocalContext.current
+    val configuration = LocalConfiguration.current
+    val isTabletLayout = configuration.screenWidthDp >= 600
+    val activeIndex = workspace.activeTabIndex
+    val activeViewModel = workspace.activeViewModel()
+    var sidebarVisible by remember(isTabletLayout) { mutableStateOf(isTabletLayout) }
+
+    if (activeViewModel == null) return
+
+    LaunchedEffect(
+        activeIndex,
+        activeViewModel.host,
+        activeViewModel.port,
+        activeViewModel.username,
+        activeViewModel.password,
+        activeViewModel.domain,
+        activeViewModel.connectionMode,
+        activeViewModel.selectedResolution,
+        activeViewModel.customWidth,
+        activeViewModel.customHeight
+    ) {
+        delay(300)
+        workspace.save(context)
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color(0xFF0F1219))
+    ) {
+        if (isTabletLayout && sidebarVisible) {
+            ConnectionsSidebar(
+                workspace = workspace,
+                activeViewModel = activeViewModel,
+                onConnect = onConnect
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(1.dp)
+                    .background(Color(0xFF334155))
+            )
         }
-        ConnectionState.CONNECTING -> {
-            ConnectingScreen(viewModel)
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+        ) {
+            WorkspaceTabBar(
+                workspace = workspace,
+                isTabletLayout = isTabletLayout,
+                onToggleSidebar = { sidebarVisible = !sidebarVisible }
+            )
+            Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
+                when (activeViewModel.connectionState) {
+                    ConnectionState.IDLE, ConnectionState.FAILED -> {
+                        ConnectionDashboard(activeViewModel) { onConnect(activeViewModel) }
+                    }
+                    ConnectionState.CONNECTING -> {
+                        ConnectingScreen(activeViewModel)
+                    }
+                    ConnectionState.CONNECTED -> {
+                        RdpSessionScreen(activeViewModel)
+                    }
+                }
+            }
         }
-        ConnectionState.CONNECTED -> {
-            RdpSessionScreen(viewModel)
+    }
+}
+
+@Composable
+private fun ConnectionsSidebar(
+    workspace: RdpWorkspaceViewModel,
+    activeViewModel: RdpViewModel,
+    onConnect: (RdpViewModel) -> Unit
+) {
+    val context = LocalContext.current
+    var searchQuery by remember { mutableStateOf("") }
+    var editingProfile by remember { mutableStateOf<SavedConnectionProfile?>(null) }
+    val filteredProfiles = workspace.savedConnections.filter { profile ->
+        searchQuery.isBlank() ||
+            profile.name.contains(searchQuery, ignoreCase = true) ||
+            profile.host.contains(searchQuery, ignoreCase = true)
+    }
+
+    Column(
+        modifier = Modifier
+            .width(248.dp)
+            .fillMaxHeight()
+            .background(Color(0xFF111827))
+            .padding(horizontal = 12.dp, vertical = 14.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text("Connections", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text("Saved servers", color = Color(0xFF94A3B8), fontSize = 11.sp)
+            }
+            IconButton(
+                onClick = { editingProfile = SavedConnectionProfile() },
+                modifier = Modifier.size(38.dp).background(Color(0xFF263548), RoundedCornerShape(9.dp))
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Add saved connection", tint = Color(0xFF66FCF1))
+            }
         }
+
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            modifier = Modifier.fillMaxWidth(),
+            singleLine = true,
+            placeholder = { Text("Search servers", color = Color(0xFF64748B), fontSize = 13.sp) },
+            leadingIcon = { Text("⌕", color = Color(0xFF94A3B8), fontSize = 20.sp) },
+            colors = OutlinedTextFieldDefaults.colors(
+                focusedBorderColor = Color(0xFF66FCF1),
+                unfocusedBorderColor = Color(0xFF334155),
+                focusedTextColor = Color.White,
+                unfocusedTextColor = Color.White,
+                cursorColor = Color(0xFF66FCF1)
+            )
+        )
+
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("SAVED (${workspace.savedConnections.size})", color = Color(0xFF94A3B8), fontSize = 10.sp, fontWeight = FontWeight.Bold)
+            TextButton(
+                onClick = {
+                    editingProfile = activeViewModel.toSavedConnectionProfile(
+                        activeViewModel.host.ifBlank { "New server" }
+                    )
+                },
+                enabled = activeViewModel.host.isNotBlank(),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+            ) {
+                Text("Save current", color = if (activeViewModel.host.isNotBlank()) Color(0xFF66FCF1) else Color(0xFF64748B), fontSize = 11.sp)
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (filteredProfiles.isEmpty()) {
+                Text(
+                    if (workspace.savedConnections.isEmpty()) "No saved connections yet. Add a server or save the current connection." else "No matching servers.",
+                    color = Color(0xFF64748B),
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(vertical = 16.dp)
+                )
+            }
+
+            filteredProfiles.forEach { profile ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = Color(0xFF1B2230)),
+                    border = BorderStroke(1.dp, Color(0xFF263548))
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(10.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier.size(8.dp).background(
+                                    if (profile.connectionMode == "VNC") Color(0xFFF59E0B) else Color(0xFF38BDF8),
+                                    CircleShape
+                                )
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(profile.name, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${profile.host}:${profile.port} · ${profile.connectionMode}", color = Color(0xFF94A3B8), fontSize = 10.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                        }
+                        Spacer(Modifier.height(6.dp))
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(2.dp)
+                        ) {
+                            TextButton(
+                                onClick = {
+                                    var target = workspace.activeViewModel() ?: activeViewModel
+                                    if (target.connectionState == ConnectionState.CONNECTED || target.connectionState == ConnectionState.CONNECTING) {
+                                        workspace.addTab(context)
+                                        target = workspace.activeViewModel() ?: target
+                                    }
+                                    target.applySavedConnection(profile)
+                                    workspace.save(context)
+                                    onConnect(target)
+                                },
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp)
+                            ) { Text("Connect", color = Color(0xFF66FCF1), fontSize = 11.sp) }
+                            TextButton(
+                                onClick = { editingProfile = profile },
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp)
+                            ) { Text("Edit", color = Color(0xFFCBD5E1), fontSize = 11.sp) }
+                            TextButton(
+                                onClick = { workspace.deleteSavedConnection(context, profile.id) },
+                                contentPadding = PaddingValues(horizontal = 7.dp, vertical = 0.dp)
+                            ) { Text("Delete", color = Color(0xFFF87171), fontSize = 11.sp) }
+                        }
+                    }
+                }
+            }
+        }
+
+        Text(
+            "Hold a tab and drag it to reorder.",
+            color = Color(0xFF64748B),
+            fontSize = 10.sp,
+            modifier = Modifier.padding(top = 10.dp)
+        )
+    }
+
+    editingProfile?.let { profile ->
+        SavedConnectionEditor(
+            profile = profile,
+            onDismiss = { editingProfile = null },
+            onSave = { saved ->
+                workspace.saveProfile(context, saved)
+                editingProfile = null
+            }
+        )
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ConnectionDashboard(viewModel: RdpViewModel) {
+private fun SavedConnectionEditor(
+    profile: SavedConnectionProfile,
+    onDismiss: () -> Unit,
+    onSave: (SavedConnectionProfile) -> Unit
+) {
+    var name by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.name) }
+    var host by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.host) }
+    var port by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.port) }
+    var username by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.username) }
+    var password by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.password) }
+    var domain by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.domain) }
+    var mode by remember(profile.id, profile.name, profile.host) { mutableStateOf(profile.connectionMode) }
+    val scrollState = rememberScrollState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (profile.id == 0L) "Add saved connection" else "Edit saved connection") },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = 500.dp).verticalScroll(scrollState),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(name, { name = it }, label = { Text("Display name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(host, { host = it }, label = { Text("Host / IP address") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(port, { port = it.filter(Char::isDigit).take(5) }, label = { Text("Port") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(
+                        selected = mode == "RDP",
+                        onClick = {
+                            if (mode != "RDP" && port == "5900") port = "3389"
+                            mode = "RDP"
+                        },
+                        label = { Text("RDP") }
+                    )
+                    FilterChip(
+                        selected = mode == "VNC",
+                        onClick = {
+                            if (mode != "VNC" && port == "3389") port = "5900"
+                            mode = "VNC"
+                        },
+                        label = { Text("VNC") }
+                    )
+                }
+                OutlinedTextField(username, { username = it }, label = { Text("Username") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(password, { password = it }, label = { Text("Password") }, singleLine = true, visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(domain, { domain = it }, label = { Text("Domain (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = host.isNotBlank() && (port.toIntOrNull()?.let { it in 1..65535 } == true),
+                onClick = {
+                    onSave(
+                        profile.copy(
+                            name = name.ifBlank { host },
+                            host = host.trim(),
+                            port = port,
+                            username = username,
+                            password = password,
+                            domain = domain,
+                            connectionMode = mode
+                        )
+                    )
+                }
+            ) { Text("Save") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+        containerColor = Color(0xFF1B2230),
+        titleContentColor = Color.White,
+        textContentColor = Color(0xFFCBD5E1)
+    )
+}
+
+@Composable
+private fun WorkspaceTabBar(
+    workspace: RdpWorkspaceViewModel,
+    isTabletLayout: Boolean,
+    onToggleSidebar: () -> Unit
+) {
     val context = LocalContext.current
-    val sharedPrefs = remember {
-        context.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
+    val density = LocalDensity.current
+    var pendingCloseIndex by remember { mutableStateOf<Int?>(null) }
+    val tabHeight = if (isTabletLayout) 64.dp else 60.dp
+    val tabWidth = if (isTabletLayout) 190.dp else 150.dp
+    val dragStepPx = with(density) { (tabWidth + 6.dp).toPx() * 0.5f }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(tabHeight)
+            .background(Color(0xFF111827))
+            .padding(horizontal = if (isTabletLayout) 12.dp else 6.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        if (isTabletLayout) {
+            IconButton(
+                onClick = onToggleSidebar,
+                modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)).background(Color(0xFF263548))
+            ) {
+                Icon(Icons.Default.Menu, contentDescription = "Toggle connections sidebar", tint = Color(0xFFCBD5E1))
+            }
+            Spacer(Modifier.width(8.dp))
+        }
+
+        Row(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxHeight()
+                .horizontalScroll(rememberScrollState()),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            workspace.tabs.forEachIndexed { index, tab ->
+                val viewModel = tab.viewModel
+                val selected = index == workspace.activeTabIndex
+                val statusColor = when (viewModel.connectionState) {
+                    ConnectionState.CONNECTED -> Color(0xFF10B981)
+                    ConnectionState.CONNECTING -> Color(0xFFF59E0B)
+                    ConnectionState.FAILED -> Color(0xFFEF4444)
+                    ConnectionState.IDLE -> Color(0xFF64748B)
+                }
+                val statusLabel = when (viewModel.connectionState) {
+                    ConnectionState.CONNECTED -> "Connected"
+                    ConnectionState.CONNECTING -> "Connecting"
+                    ConnectionState.FAILED -> "Failed"
+                    ConnectionState.IDLE -> "Disconnected"
+                }
+
+                Row(
+                    modifier = Modifier
+                        .padding(end = 6.dp)
+                        .width(tabWidth)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (selected) Color(0xFF263548) else Color(0xFF1B2230))
+                        .border(
+                            width = if (selected) 1.dp else 0.dp,
+                            color = if (selected) Color(0xFF66FCF1).copy(alpha = 0.65f) else Color.Transparent,
+                            shape = RoundedCornerShape(9.dp)
+                        )
+                        .pointerInput(tab.id, workspace.tabs.size) {
+                            var currentIndex = workspace.tabs.indexOfFirst { it.id == tab.id }
+                            var accumulatedDrag = 0f
+                            detectDragGesturesAfterLongPress(
+                                onDragStart = {
+                                    currentIndex = workspace.tabs.indexOfFirst { it.id == tab.id }
+                                    accumulatedDrag = 0f
+                                },
+                                onDrag = { change, dragAmount ->
+                                    accumulatedDrag += dragAmount.x
+                                    while (abs(accumulatedDrag) >= dragStepPx && currentIndex >= 0) {
+                                        val direction = if (accumulatedDrag > 0f) 1 else -1
+                                        val targetIndex = (currentIndex + direction).coerceIn(0, workspace.tabs.lastIndex)
+                                        if (targetIndex == currentIndex) {
+                                            accumulatedDrag = 0f
+                                            break
+                                        }
+                                        workspace.moveTab(context, currentIndex, targetIndex)
+                                        currentIndex = targetIndex
+                                        accumulatedDrag -= direction * dragStepPx
+                                    }
+                                    change.consume()
+                                }
+                            )
+                        }
+                        .clickable { workspace.selectTab(context, index) }
+                        .padding(start = 10.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.size(8.dp).background(statusColor, CircleShape))
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
+                        Text(
+                            text = viewModel.host.ifBlank { "Tab ${index + 1}" },
+                            color = if (selected) Color.White else Color(0xFFCBD5E1),
+                            fontSize = if (isTabletLayout) 13.sp else 12.sp,
+                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = statusLabel,
+                            color = if (selected) Color(0xFF94A3B8) else Color(0xFF64748B),
+                            fontSize = 10.sp,
+                            maxLines = 1
+                        )
+                    }
+                    IconButton(
+                        onClick = {
+                            if (viewModel.connectionState == ConnectionState.CONNECTED ||
+                                viewModel.connectionState == ConnectionState.CONNECTING
+                            ) {
+                                pendingCloseIndex = workspace.tabs.indexOfFirst { it.id == tab.id }
+                            } else {
+                                workspace.closeTab(context, workspace.tabs.indexOfFirst { it.id == tab.id })
+                            }
+                        },
+                        modifier = Modifier.size(30.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Close tab",
+                            tint = if (selected) Color(0xFFCBD5E1) else Color(0xFF64748B),
+                            modifier = Modifier.size(15.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.width(6.dp))
+        IconButton(
+            onClick = { workspace.addTab(context) },
+            modifier = Modifier
+                .size(if (isTabletLayout) 42.dp else 36.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(Color(0xFF263548))
+        ) {
+            Icon(Icons.Default.Add, contentDescription = "New connection tab", tint = Color(0xFF66FCF1))
+        }
     }
 
+    val closeIndex = pendingCloseIndex
+    if (closeIndex != null && closeIndex in workspace.tabs.indices) {
+        val closingViewModel = workspace.tabs[closeIndex].viewModel
+        AlertDialog(
+            onDismissRequest = { pendingCloseIndex = null },
+            title = { Text("Close connection tab?") },
+            text = {
+                Text(
+                    if (closingViewModel.connectionState == ConnectionState.CONNECTING) {
+                        "This connection is still starting. Closing the tab will cancel it."
+                    } else {
+                        "This will disconnect ${closingViewModel.host.ifBlank { "this session" }}."
+                    }
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        workspace.closeTab(context, closeIndex)
+                        pendingCloseIndex = null
+                    }
+                ) { Text("Close") }
+            },
+            dismissButton = { TextButton(onClick = { pendingCloseIndex = null }) { Text("Cancel") } },
+            containerColor = Color(0xFF1B2230),
+            titleContentColor = Color.White,
+            textContentColor = Color(0xFFCBD5E1)
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ConnectionDashboard(viewModel: RdpViewModel, onConnect: () -> Unit) {
+    val context = LocalContext.current
+    val isTabletLayout = LocalConfiguration.current.screenWidthDp >= 600
     val launcher = androidx.activity.compose.rememberLauncherForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri: Uri? ->
@@ -385,31 +1014,8 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                         viewModel.selectedResolution = "Custom"
                     }
                     
-                    // Auto connect
-                    val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(context.resources.displayMetrics)
-
-                    viewModel.onStateChanged(1, "Negotiating ${detectedMode} Connection...")
-                    viewModel.initBitmap(targetWidth, targetHeight)
-                    
-                    CoroutineScope(Dispatchers.IO).launch {
-                        try {
-                            RdpClient.connect(
-                                h,
-                                p.toIntOrNull() ?: (if (detectedMode == "VNC") 5900 else 3389),
-                                rdpUser,
-                                rdpPass,
-                                rdpDomain,
-                                targetWidth,
-                                targetHeight,
-                                detectedMode,
-                                viewModel
-                            )
-                        } catch (e: Exception) {
-                            CoroutineScope(Dispatchers.Main).launch {
-                                viewModel.onStateChanged(3, "Failed: ${e.message}")
-                            }
-                        }
-                    }
+                    // Auto connect the imported profile in this tab.
+                    onConnect()
                 }
             } catch (e: Exception) {
             }
@@ -445,29 +1051,6 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
         }
     }
 
-    // Initialize values from SharedPreferences if ViewModel states are empty
-    LaunchedEffect(Unit) {
-        if (viewModel.host.isEmpty()) {
-            viewModel.host = sharedPrefs.getString("host", "") ?: ""
-            viewModel.port = sharedPrefs.getString("port", "3389") ?: "3389"
-            viewModel.username = sharedPrefs.getString("username", "") ?: ""
-            viewModel.password = sharedPrefs.getString("password", "") ?: ""
-            viewModel.domain = sharedPrefs.getString("domain", "") ?: ""
-            viewModel.connectionMode = sharedPrefs.getString("connectionMode", "RDP") ?: "RDP"
-            viewModel.customWidth = sharedPrefs.getString("customWidth", "1920") ?: "1920"
-            viewModel.customHeight = sharedPrefs.getString("customHeight", "1080") ?: "1080"
-            val savedRes = sharedPrefs.getString("resolution", "1920x1080 (FHD)") ?: "1920x1080 (FHD)"
-            viewModel.setResolution(savedRes)
-        }
-    }
-
-    val host = viewModel.host
-    val port = viewModel.port
-    val username = viewModel.username
-    val password = viewModel.password
-    val domain = viewModel.domain
-    val connectionMode = viewModel.connectionMode
-
     val scrollState = rememberScrollState()
 
     Box(
@@ -482,8 +1065,8 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
     ) {
         Column(
             modifier = Modifier
-                .widthIn(max = 480.dp)
-                .fillMaxWidth(0.9f)
+                .widthIn(max = if (isTabletLayout) 760.dp else 480.dp)
+                .fillMaxWidth(if (isTabletLayout) 0.82f else 0.9f)
                 .padding(vertical = 12.dp)
                 .background(Color(0xFF1E293B), shape = RoundedCornerShape(16.dp))
                 .border(1.dp, Color(0xFF334155), shape = RoundedCornerShape(16.dp))
@@ -559,7 +1142,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             ) {
                 val modes = listOf("RDP", "VNC")
                 modes.forEach { mode ->
-                    val isSelected = connectionMode == mode
+                    val isSelected = viewModel.connectionMode == mode
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -571,9 +1154,9 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                             .clickable {
                                 viewModel.connectionMode = mode
                                 // Change default port automatically
-                                if (mode == "VNC" && port == "3389") {
+                                if (mode == "VNC" && viewModel.port == "3389") {
                                     viewModel.port = "5900"
-                                } else if (mode == "RDP" && port == "5900") {
+                                } else if (mode == "RDP" && viewModel.port == "5900") {
                                     viewModel.port = "3389"
                                 }
                             },
@@ -590,7 +1173,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             }
 
             OutlinedTextField(
-                value = host,
+                value = viewModel.host,
                 onValueChange = { viewModel.host = it },
                 label = { Text("Remote PC IP Address") },
                 singleLine = true,
@@ -601,10 +1184,10 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                 )
             )
 
-            if (connectionMode == "RDP") {
+            if (viewModel.connectionMode == "RDP") {
                 Row(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
                     OutlinedTextField(
-                        value = port,
+                        value = viewModel.port,
                         onValueChange = { viewModel.port = it },
                         label = { Text("Port") },
                         singleLine = true,
@@ -617,7 +1200,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                     )
 
                     OutlinedTextField(
-                        value = domain,
+                        value = viewModel.domain,
                         onValueChange = { viewModel.domain = it },
                         label = { Text("Domain (optional)") },
                         singleLine = true,
@@ -630,7 +1213,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
                 }
             } else {
                 OutlinedTextField(
-                    value = port,
+                    value = viewModel.port,
                     onValueChange = { viewModel.port = it },
                     label = { Text("Port") },
                     singleLine = true,
@@ -644,9 +1227,9 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             }
 
             OutlinedTextField(
-                value = username,
+                value = viewModel.username,
                 onValueChange = { viewModel.username = it },
-                label = { Text(if (connectionMode == "VNC") "Username (optional)" else "Username") },
+                label = { Text(if (viewModel.connectionMode == "VNC") "Username (optional)" else "Username") },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                 colors = OutlinedTextFieldDefaults.colors(
@@ -658,7 +1241,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             var showPassword by remember { mutableStateOf(false) }
 
             OutlinedTextField(
-                value = password,
+                value = viewModel.password,
                 onValueChange = { viewModel.password = it },
                 label = { Text("Password") },
                 singleLine = true,
@@ -779,52 +1362,7 @@ fun ConnectionDashboard(viewModel: RdpViewModel) {
             }
 
             Button(
-                onClick = {
-                    // Save last inputted values to SharedPreferences
-                    sharedPrefs.edit().apply {
-                        putString("host", host)
-                        putString("port", port)
-                        putString("username", username)
-                        putString("password", password)
-                        putString("domain", domain)
-                        putString("connectionMode", connectionMode)
-                        putString("resolution", viewModel.selectedResolution)
-                        putString("customWidth", viewModel.customWidth)
-                        putString("customHeight", viewModel.customHeight)
-                        apply()
-                    }
-
-                    val (targetWidth, targetHeight) = viewModel.calculateTargetResolution(context.resources.displayMetrics)
-
-                    viewModel.onStateChanged(1, "Negotiating $connectionMode Connection...")
-                    viewModel.initBitmap(targetWidth, targetHeight)
-                    
-                    val defaultPort = if (connectionMode == "VNC") 5900 else 3389
-
-                    CoroutineScope(Dispatchers.IO).launch {
-                        try {
-                            RdpClient.connect(
-                                host,
-                                port.toIntOrNull() ?: defaultPort,
-                                username,
-                                password,
-                                domain,
-                                targetWidth,
-                                targetHeight,
-                                connectionMode,
-                                viewModel
-                            )
-                        } catch (e: Exception) {
-                            CoroutineScope(Dispatchers.Main).launch {
-                                viewModel.onStateChanged(3, "Failed: ${e.message}")
-                            }
-                        } catch (e: LinkageError) {
-                            CoroutineScope(Dispatchers.Main).launch {
-                                viewModel.onStateChanged(3, "LinkageError: ${e.message}")
-                            }
-                        }
-                    }
-                },
+                onClick = { onConnect() },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp),
@@ -872,7 +1410,11 @@ fun ConnectingScreen(viewModel: RdpViewModel) {
             Spacer(modifier = Modifier.height(32.dp))
             OutlinedButton(
                 onClick = {
-                    RdpClient.disconnect()
+                    viewModel.connectionGeneration += 1L
+                    if (viewModel.sessionId != 0L) {
+                        RdpClient.disconnectSession(viewModel.sessionId)
+                        viewModel.sessionId = 0L
+                    }
                     viewModel.onStateChanged(0, "Cancelled")
                 },
                 border = BorderStroke(1.dp, Color(0xFFEF4444)),
@@ -1276,6 +1818,7 @@ fun KeyboardModifierButton(
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 fun RdpSessionScreen(viewModel: RdpViewModel) {
     var keyboardInput by remember { mutableStateOf("") }
@@ -1313,6 +1856,8 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     var isAltPressed by remember { mutableStateOf(false) }
     var isShiftPressed by remember { mutableStateOf(false) }
     var isWinPressed by remember { mutableStateOf(false) }
+    var canvasSize by remember { mutableStateOf(IntSize.Zero) }
+    val physicalKeyboardFocusRequester = remember { FocusRequester() }
 
     val focusRequester = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
@@ -1412,10 +1957,61 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
     val configuration = LocalConfiguration.current
     val isPortrait = configuration.orientation == Configuration.ORIENTATION_PORTRAIT
 
+    fun mapHardwarePointerToRemote(x: Float, y: Float): Offset {
+        val width = canvasSize.width.toFloat().coerceAtLeast(1f)
+        val height = canvasSize.height.toFloat().coerceAtLeast(1f)
+        val fitScale = minOf(width / viewModel.screenWidth.toFloat(), height / viewModel.screenHeight.toFloat())
+        val drawWidth = viewModel.screenWidth * fitScale
+        val drawHeight = viewModel.screenHeight * fitScale
+        val drawLeft = (width - drawWidth) / 2f
+        val drawTop = if (isPortrait && isKeyboardOpened) (if (isToolbarVisible) toolbarHeightPx else 0f) else (height - drawHeight) / 2f
+        val pivotX = width / 2f
+        val pivotY = if (isPortrait && isKeyboardOpened) drawTop else height / 2f
+        val canvasX = ((x - offset.x - pivotX) / scale) + pivotX
+        val canvasY = ((y - offset.y - pivotY) / scale) + pivotY
+        val remoteX = ((canvasX - drawLeft) / drawWidth) * viewModel.screenWidth
+        val remoteY = ((canvasY - drawTop) / drawHeight) * viewModel.screenHeight
+        return Offset(
+            remoteX.coerceIn(0f, (viewModel.screenWidth - 1).toFloat()),
+            remoteY.coerceIn(0f, (viewModel.screenHeight - 1).toFloat())
+        )
+    }
+
+    fun updateHardwarePointer(event: MotionEvent) {
+        val remote = mapHardwarePointerToRemote(event.x, event.y)
+        cursorX = remote.x
+        cursorY = remote.y
+        lastMouseX = remote.x.roundToInt()
+        lastMouseY = remote.y.roundToInt()
+        RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 0)
+    }
+
+    LaunchedEffect(viewModel.sessionId) {
+        if (viewModel.sessionId != 0L) {
+            delay(100)
+            runCatching { physicalKeyboardFocusRequester.requestFocus() }
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black)
+            .focusRequester(physicalKeyboardFocusRequester)
+            .focusable()
+            .onPreviewKeyEvent { composeEvent ->
+                val nativeEvent = composeEvent.nativeKeyEvent
+                val mappedKey = mapAndroidKeyToRdp(nativeEvent.keyCode)
+                if (mappedKey == null) {
+                    false
+                } else {
+                    when (nativeEvent.action) {
+                        AndroidKeyEvent.ACTION_DOWN -> RdpClient.sendScancodeEvent(mappedKey.scanCode, mappedKey.extended, 1)
+                        AndroidKeyEvent.ACTION_UP -> RdpClient.sendScancodeEvent(mappedKey.scanCode, mappedKey.extended, 0)
+                    }
+                    nativeEvent.action == AndroidKeyEvent.ACTION_DOWN || nativeEvent.action == AndroidKeyEvent.ACTION_UP
+                }
+            }
     ) {
         // RDP Desktop Stream Canvas
         Box(
@@ -1493,6 +2089,67 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
             Canvas(
                 modifier = Modifier
                     .fillMaxSize()
+                    .onSizeChanged { canvasSize = it }
+                    .pointerInteropFilter { event ->
+                        if (!event.isFromSource(InputDevice.SOURCE_MOUSE)) {
+                            false
+                        } else {
+                            when (event.actionMasked) {
+                                MotionEvent.ACTION_HOVER_ENTER,
+                                MotionEvent.ACTION_HOVER_MOVE,
+                                MotionEvent.ACTION_MOVE -> updateHardwarePointer(event)
+
+                                MotionEvent.ACTION_DOWN -> {
+                                    updateHardwarePointer(event)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 1)
+                                }
+
+                                MotionEvent.ACTION_UP -> {
+                                    updateHardwarePointer(event)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 2)
+                                }
+
+                                MotionEvent.ACTION_BUTTON_PRESS -> {
+                                    updateHardwarePointer(event)
+                                    when (event.actionButton) {
+                                        MotionEvent.BUTTON_PRIMARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 1)
+                                        MotionEvent.BUTTON_SECONDARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 3)
+                                        MotionEvent.BUTTON_TERTIARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 5)
+                                        MotionEvent.BUTTON_BACK -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 7)
+                                        MotionEvent.BUTTON_FORWARD -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 9)
+                                    }
+                                }
+
+                                MotionEvent.ACTION_BUTTON_RELEASE -> {
+                                    updateHardwarePointer(event)
+                                    when (event.actionButton) {
+                                        MotionEvent.BUTTON_PRIMARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 2)
+                                        MotionEvent.BUTTON_SECONDARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 4)
+                                        MotionEvent.BUTTON_TERTIARY -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 6)
+                                        MotionEvent.BUTTON_BACK -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 8)
+                                        MotionEvent.BUTTON_FORWARD -> RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 10)
+                                    }
+                                }
+
+                                MotionEvent.ACTION_SCROLL -> {
+                                    updateHardwarePointer(event)
+                                    val vertical = (event.getAxisValue(MotionEvent.AXIS_VSCROLL) * 120f).roundToInt()
+                                    val horizontal = (event.getAxisValue(MotionEvent.AXIS_HSCROLL) * 120f).roundToInt()
+                                    if (vertical != 0) RdpClient.sendMouseWheelEvent(lastMouseX, lastMouseY, vertical)
+                                    if (horizontal != 0) RdpClient.sendMouseHorizontalWheelEvent(lastMouseX, lastMouseY, horizontal)
+                                }
+
+                                MotionEvent.ACTION_CANCEL -> {
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 2)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 4)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 6)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 8)
+                                    RdpClient.sendMouseEvent(lastMouseX, lastMouseY, 10)
+                                }
+                            }
+                            true
+                        }
+                    }
                     .pointerInput(Unit) {
                         val followCursor = {
                             val fitScale = minOf(size.width / viewModel.screenWidth.toFloat(), size.height / viewModel.screenHeight.toFloat())
@@ -1949,7 +2606,10 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
                     IconButton(
                         onClick = {
                             releaseAllModifiers()
-                            RdpClient.disconnect()
+                            if (viewModel.sessionId != 0L) {
+                                RdpClient.disconnectSession(viewModel.sessionId)
+                                viewModel.sessionId = 0L
+                            }
                             viewModel.onStateChanged(0, "Disconnected")
                         },
                         colors = IconButtonDefaults.iconButtonColors(containerColor = Color(0xFFEF4444)),
