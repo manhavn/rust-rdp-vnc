@@ -76,6 +76,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.ui.graphics.drawscope.translate
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -452,6 +453,18 @@ fun RdpAppScreen(
     val activeIndex = workspace.activeTabIndex
     val activeViewModel = workspace.activeViewModel()
     var sidebarVisible by remember(isTabletLayout) { mutableStateOf(isTabletLayout) }
+    // Keep the user's tab bar preference across Activity recreation and app restarts.
+    val workspacePrefs = remember(context) {
+        context.applicationContext.getSharedPreferences("rdp_prefs", Context.MODE_PRIVATE)
+    }
+    var tabBarVisible by remember {
+        mutableStateOf(workspacePrefs.getBoolean("workspace_tab_bar_visible", true))
+    }
+    val toggleTabBar: () -> Unit = {
+        val nextVisible = !tabBarVisible
+        tabBarVisible = nextVisible
+        workspacePrefs.edit().putBoolean("workspace_tab_bar_visible", nextVisible).apply()
+    }
 
     if (activeViewModel == null) return
 
@@ -495,11 +508,14 @@ fun RdpAppScreen(
                 .weight(1f)
                 .fillMaxHeight()
         ) {
-            WorkspaceTabBar(
-                workspace = workspace,
-                isTabletLayout = isTabletLayout,
-                onToggleSidebar = { sidebarVisible = !sidebarVisible }
-            )
+            if (tabBarVisible) {
+                WorkspaceTabBar(
+                    workspace = workspace,
+                    isTabletLayout = isTabletLayout,
+                    onToggleSidebar = { sidebarVisible = !sidebarVisible },
+                    onHideTabBar = toggleTabBar
+                )
+            }
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 when (activeViewModel.connectionState) {
                     ConnectionState.IDLE, ConnectionState.FAILED -> {
@@ -510,6 +526,37 @@ fun RdpAppScreen(
                     }
                     ConnectionState.CONNECTED -> {
                         RdpSessionScreen(activeViewModel)
+                    }
+                }
+
+                // Small floating control is always available, even while viewing a session.
+                // Keep it at the bottom to avoid covering the remote toolbar at the top.
+                if (!tabBarVisible) {
+                    Row(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(end = 12.dp, bottom = 12.dp)
+                            .heightIn(min = 42.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(Color(0xE6111827))
+                            .border(1.dp, Color(0xFF475569), RoundedCornerShape(10.dp))
+                            .clickable(onClick = toggleTabBar)
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            contentDescription = "Show tab bar",
+                            tint = Color(0xFF66FCF1),
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(Modifier.width(5.dp))
+                        Text(
+                            text = "Tabs (${workspace.tabs.size})",
+                            color = Color.White,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
                     }
                 }
             }
@@ -761,7 +808,8 @@ private fun SavedConnectionEditor(
 private fun WorkspaceTabBar(
     workspace: RdpWorkspaceViewModel,
     isTabletLayout: Boolean,
-    onToggleSidebar: () -> Unit
+    onToggleSidebar: () -> Unit,
+    onHideTabBar: () -> Unit
 ) {
     val context = LocalContext.current
     val density = LocalDensity.current
@@ -798,6 +846,15 @@ private fun WorkspaceTabBar(
             workspace.tabs.forEachIndexed { index, tab ->
                 val viewModel = tab.viewModel
                 val selected = index == workspace.activeTabIndex
+                val tabHost = viewModel.host.trim()
+                val tabPort = viewModel.port.trim().ifBlank {
+                    if (viewModel.connectionMode == "VNC") "5900" else "3389"
+                }
+                val tabHostLabel = when {
+                    tabHost.isBlank() -> "Tab ${index + 1}"
+                    tabHost.contains(':') && !(tabHost.startsWith('[') && tabHost.endsWith(']')) -> "[$tabHost]"
+                    else -> tabHost
+                }
                 val statusColor = when (viewModel.connectionState) {
                     ConnectionState.CONNECTED -> Color(0xFF10B981)
                     ConnectionState.CONNECTING -> Color(0xFFF59E0B)
@@ -855,14 +912,27 @@ private fun WorkspaceTabBar(
                     Box(modifier = Modifier.size(8.dp).background(statusColor, CircleShape))
                     Spacer(modifier = Modifier.width(8.dp))
                     Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.Center) {
-                        Text(
-                            text = viewModel.host.ifBlank { "Tab ${index + 1}" },
-                            color = if (selected) Color.White else Color(0xFFCBD5E1),
-                            fontSize = if (isTabletLayout) 13.sp else 12.sp,
-                            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = tabHostLabel,
+                                modifier = Modifier.weight(1f, fill = false),
+                                color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                fontSize = if (isTabletLayout) 13.sp else 12.sp,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            // The port stays visible even when a long hostname is truncated.
+                            if (tabHost.isNotBlank()) {
+                                Text(
+                                    text = ":$tabPort",
+                                    color = if (selected) Color.White else Color(0xFFCBD5E1),
+                                    fontSize = if (isTabletLayout) 12.sp else 11.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    maxLines = 1
+                                )
+                            }
+                        }
                         Text(
                             text = statusLabel,
                             color = if (selected) Color(0xFF94A3B8) else Color(0xFF64748B),
@@ -902,6 +972,21 @@ private fun WorkspaceTabBar(
                 .background(Color(0xFF263548))
         ) {
             Icon(Icons.Default.Add, contentDescription = "New connection tab", tint = Color(0xFF66FCF1))
+        }
+        // Keep the add and collapse actions visually distinct and easy to tap.
+        Spacer(modifier = Modifier.width(14.dp))
+        IconButton(
+            onClick = onHideTabBar,
+            modifier = Modifier
+                .size(if (isTabletLayout) 42.dp else 36.dp)
+                .clip(RoundedCornerShape(9.dp))
+                .background(Color(0xFF263548))
+        ) {
+            Icon(
+                Icons.Default.KeyboardArrowUp,
+                contentDescription = "Hide tab bar",
+                tint = Color(0xFFCBD5E1)
+            )
         }
     }
 

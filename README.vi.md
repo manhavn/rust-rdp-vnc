@@ -99,6 +99,7 @@ open ios/RustRdpVnc.xcodeproj
 ## Android — tablet workspace, nhiều tab và thiết bị ngoại vi
 
 - Mỗi tab giữ một phiên RDP/VNC riêng; có thể tạo, chuyển, đóng và kéo thả tab để đổi thứ tự như trên Desktop. Thứ tự tab và tab đang chọn được lưu lại.
+- Thanh tab hiển thị **host:port** của từng kết nối (port vẫn nhìn thấy khi host quá dài). Nhấn nút mũi tên lên bên cạnh nút **+** để ẩn thanh tab; khi ẩn sẽ có nút **Tabs (N)** nhỏ ở góc dưới bên phải để hiện lại. Trạng thái ẩn/hiện được ghi nhớ sau khi mở lại ứng dụng.
 - Sidebar **Connections** quản lý các cấu hình đã lưu độc lập với tab đang mở: tìm kiếm, thêm, sửa, xóa và kết nối nhanh. Nếu tab hiện tại đang kết nối, profile sẽ mở trong tab mới.
 - Tab và cấu hình kết nối được khôi phục sau khi mở ứng dụng lại. Các phiên mạng không tự reconnect sau khi tiến trình Android bị dừng; người dùng chủ động kết nối lại.
 - Bàn phím Bluetooth/USB gửi scan code PC cho các phím chữ, số, chức năng, điều hướng và modifier; các tổ hợp như Ctrl+C/Ctrl+V/Ctrl+Alt+Del được chuyển tiếp khi Android không giữ phím tắt đó cho hệ thống.

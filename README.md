@@ -99,6 +99,7 @@ open ios/RustRdpVnc.xcodeproj
 ## Android — tablet workspace and peripherals
 
 - Each tab owns an independent RDP/VNC session. Create, switch, close, and drag tabs to reorder them; the order and active tab are persisted.
+- The tab title shows **host:port**, keeping the port visible for long hostnames. Use the up-arrow next to **+** to hide the tab bar; use the small **Tabs (N)** button in the bottom-right corner to show it again. This visibility preference survives app restarts.
 - The **Connections** sidebar manages saved profiles independently from open tabs: search, add, edit, delete, and connect. Connecting a profile opens a new tab when the current tab is already connected.
 - Tabs and connection forms are restored after app restart. Network sessions do not automatically reconnect after the Android process is stopped; reconnect manually.
 - Bluetooth/USB keyboards forward PC scan codes for letters, numbers, function/navigation keys, and modifiers. Common shortcuts such as Ctrl+C/Ctrl+V/Ctrl+Alt+Del are forwarded when Android does not reserve them for the system.
