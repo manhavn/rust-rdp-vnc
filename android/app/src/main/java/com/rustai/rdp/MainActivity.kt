@@ -2267,7 +2267,7 @@ fun RdpSessionScreen(viewModel: RdpViewModel) {
 
                         detectPinchZoomPan(
                             onZoom = { zoom ->
-                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            scale = (scale * zoom).coerceIn(0.2f, 5f)
 
                             val fitScale = minOf(size.width / viewModel.screenWidth.toFloat(), size.height / viewModel.screenHeight.toFloat())
                             val drawWidth = viewModel.screenWidth * fitScale
